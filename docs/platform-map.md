@@ -68,7 +68,7 @@ Android static libs to avoid risking installer packaging. The audit tool pins
 `WiX/3.8/x86/burn.exe` in the Windows `must_keep` list, so if someone adds
 `-exclude=x86` later the audit fails immediately and explains why.
 
-## Three names that mislead
+## Names that mislead
 
 ### `Unix` is a Linux payload, not a platform class
 
@@ -126,6 +126,91 @@ almost entirely the Apple Silicon .NET SDK under
 That separation is what lets an Intel Mac drop the Apple Silicon runtime and keep
 everything it needs. But the two directions are **not symmetric** — see below.
 
+### Intel Mac support status (checked 2026-10-17)
+
+This came up as a disagreement, and the answer depends on which layer you look
+at.
+
+**The claim:** Epic dropped Intel Mac support in UE 5.8.
+
+**What the 5.8.3 source tree shows** — five signals, all unchanged from 5.7.4:
+
+| Signal | 5.8.3 |
+|---|---|
+| `Engine/Config/BaseEngine.ini:3439` | `TargetArchitecture=MacTargetArchitectureUniversal` (byte-identical to 5.7.4) |
+| `UEBuildMac.cs:105` | `base(new[] { UnrealArch.X64, UnrealArch.Arm64 })` |
+| `UEBuildMac.cs:242-246` | still resolves `DefaultArchitecture=...intel` to `UnrealArch.X64`, throwing only if `SupportedArchitecture` excludes it |
+| `Mac/SetupDotnet.sh:47` | still `ARCH=x64; [ $(uname -m) == arm64 ] && ARCH=arm64` -> `DotNet/10.0/mac-$ARCH` |
+| manifest | still ships `DotNet/10.0/mac-x64` (5,040 files) and `EpicGames.Perforce.Native/mac-x64` |
+
+One signal even points the other way: 5.8.3's new `Catch2/v3.11.0/lib/Mac/` ships
+**both** `arm64/` and `x86_64/`, where 5.7.4's Catch2 had no split at all.
+
+**The likely reconciliation:** an official support change - no longer shipping
+prebuilt Intel Mac editor binaries, or an announced deprecation - would not
+necessarily show up in the source tree or in `Commit.gitdeps.xml` at all. A source
+build can keep working long after the binary distribution stops. So the claim can
+be true about *support status* while the tree still carries the x64 code path.
+Those are different questions, and this repo only has access to the second one.
+
+**What it means for the profiles: nothing, either way.** On Apple Silicon
+`HOST_ARCH` is `arm64`, so the profile already drops `mac-x64` and keeps
+`mac-arm64` - exactly what "Intel is gone" implies. The x64 branch is only reached
+on an Intel Mac, which is the one machine that needs the x64 runtime pack to run
+UnrealBuildTool. Removing the branch would save nothing on an Apple Silicon
+machine and would break the engine on an Intel one.
+
+To remove it anyway, apply this patch to `scripts/Setup_Minimal.sh`:
+
+```sh
+-if [ "$HOST_ARCH" = "arm64" ]; then
+-	KEEP_RID="mac-arm64"
+-	for DOTNET_VERSION in $DOTNET_VERSIONS; do
+-		EXCLUDES+=("-exclude=/Engine/Binaries/ThirdParty/DotNet/$DOTNET_VERSION/mac-x64")
+-	done
+-fi
++# Intel Mac hosts are not supported from UE 5.8, so drop mac-x64 everywhere.
++KEEP_RID="mac-arm64"
++for DOTNET_VERSION in $DOTNET_VERSIONS; do
++	EXCLUDES+=("-exclude=/Engine/Binaries/ThirdParty/DotNet/$DOTNET_VERSION/mac-x64")
++done
+```
+
+Only for an engine version where you are certain - the failure mode is a Mac that
+cannot run UnrealBuildTool.
+
+### Where the Mac payloads actually are
+
+UE's Mac third-party libraries are mostly **universal binaries in flat
+directories**, not architecture-split ones, so there is little to gain by
+declaring "Mac is arm64-only". The complete set of architecture-split Mac
+directories in 5.7.4 is four, and all four are arm64-only already:
+
+```
+Engine/Source/ThirdParty/abseil/20240722.0/lib/Mac/arm64/      90 files
+Engine/Source/ThirdParty/Protobuf/30.0/bin/Mac/arm64/          12
+Engine/Source/ThirdParty/Protobuf/30.0/lib/Mac/arm64/           6
+Engine/Source/ThirdParty/cares/1.19.1/lib/Mac/arm64/            1
+```
+
+5.8.3 adds `Catch2/v3.11.0/lib/Mac/{arm64,x86_64}/` (2 files each). Everything
+else Mac - ICU, CEF, OpenSSL, Python, svn - is universal or flat. So the only
+arch-dependent Mac cut worth making is the `mac-x64` .NET runtime pack, which the
+ARM branch already takes.
+
+The macOS profile's bare `x86`/`x86_64` Android-ABI excludes also take the
+`Catch2/.../Mac/x86_64/` slices along with the emulator payload. That is
+test-only payload (the editor does not link Catch2), and the audit reports it as
+a separate declared cut so it is visible instead of being mislabelled as
+Android payload.
+
+### `WinRT` is not UWP-only
+
+`Engine/Source/ThirdParty/FreeType2/FreeType2-2.4.12/Lib/WinRT/Win64/` holds
+Win64 libraries. The Windows profile therefore keeps the `WinRT` segment even
+though it drops UWP: `-exclude=WinRT` would cut host payload. The audit pins the
+FreeType library in the Windows `must_keep` list so the mistake fails loudly.
+
 ### Architecture segments are reused outside the runtime-pack tree
 
 This is the trap that catches every hand-written arch split, and it is the
@@ -154,10 +239,13 @@ Both scripts therefore root-anchor the cut to the DotNet tree on the ARM branch:
 -exclude=/Engine/Binaries/ThirdParty/DotNet/8.0.412/linux-x64
 ```
 
-which is version-pinned, so the audit reports it as stale when the DotNet version
-moves. A deliberate trade: the failure mode of a stale pin is an extra ~9 GB
-download, while the failure mode of the bare pattern is a broken Perforce
-integration or a missing Android deploy tool, with no warning at all.
+The scripts read the version out of the manifest at run time (the
+`DOTNET_VERSIONS` block) rather than hard-coding it, and the audit expands the
+same loop. The cut is still version-specific, so a manifest with a different
+DotNet layout reports it as stale. A deliberate trade: the failure mode of a
+stale pin is an extra ~9 GB download, while the failure mode of the bare pattern
+is a broken Perforce integration or a missing Android deploy tool, with no
+warning at all.
 
 The x64 branches get to use the bare form, which is version-agnostic.
 

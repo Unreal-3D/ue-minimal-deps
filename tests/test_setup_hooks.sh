@@ -257,6 +257,18 @@ else
 fi
 contains "$BAT" 'GitDependencies.exe %EXCLUDES%' "bat hook contains only the exclude list"
 
+# Platform scope: the Windows profile must cut payload outside Win64 + Android.
+for pat in WinArm64 ArtToolsOSX UbaAgentHelperMac LinuxArm64 LinuxAArch64 linux32 linuxarm overlay-arm64-ios winuwp; do
+	contains "$BAT" "-exclude=$pat" "bat excludes $pat"
+done
+# WinRT also holds Win64 FreeType libs, and bare x86 holds WiX/Win32 payload.
+not_contains "$BAT" '-exclude=WinRT' "bat does not exclude WinRT"
+if grep -Eq -- '-exclude=x86([[:space:]]|$)' "$BAT"; then
+	fail "bat must not exclude bare x86"
+else
+	pass
+fi
+
 # ---------------------------------------------------------------------------
 
 echo

@@ -1,0 +1,8 @@
+# Batch files are stored with CRLF as-is; \r at EOL is part of the terminator,
+# not trailing whitespace for diff --check.
+*.bat -text whitespace=cr-at-eol
+
+# Everything else in this repo is LF.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf

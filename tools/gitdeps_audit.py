@@ -438,6 +438,9 @@ PROFILES = {
             "Engine/Binaries/ThirdParty/Apple/MetalShaderConverter/Windows/metalirconverter.dll",
             "Engine/Source/ThirdParty/Apple/ProResLib/lib/windows/ProRes64_VS2017.lib",
             "Engine/Source/ThirdParty/Windows/DirectX/Lib/x64/d3d12.lib",
+            # WinRT is not UWP-only: Win64 FreeType libraries live under this
+            # segment, so a blanket -exclude=WinRT would break the host build.
+            "Engine/Source/ThirdParty/FreeType2/FreeType2-2.4.12/Lib/WinRT/Win64/freetype2412MT.lib",
             # the reason bare "-exclude=x86" is deliberately absent from this
             # profile: WiX 3.8's 32-bit installer toolchain shares that segment
             "Engine/Source/ThirdParty/WiX/3.8/x86/burn.exe",
@@ -452,13 +455,24 @@ PROFILES = {
             "Engine/Source/ThirdParty/Android/cxa_demangle/arm64-v8a/libcxa_demangle.a",
         ],
         "dropped_markers": [
-            r"^Engine/Binaries/Linux/",
-            r"^Engine/Source/ThirdParty/OpenSSL/Unix/",
-            r"^Engine/Source/Runtime/SymsLib/lib/Unix/",
-            r"^Engine/Build/TVOS/",
-            r"^Engine/Build/IOS/",
-            r"^Engine/Source/ThirdParty/ICU/icu4c-53_1/(IOS|Mac)/",
-            r"^Engine/Platforms/(TVOS|VisionOS|Linux)/",
+            # These are deliberately broad: a payload can move between trees
+            # (CEF3/<platform>, Python3/<platform>, ThirdParty/<platform>) and a
+            # narrow marker is how the Windows profile passed while still
+            # downloading ~4k files from platforms it claimed to drop.
+            r"/(Linux|Mac|Unix|IOS)/",
+            r"/(TVOS|VisionOS)/",
+            r"/(LinuxArm64|LinuxAArch64)/",
+            r"/(linux32|linuxarm)/",
+            r"Win32/",
+            r"WinArm64/",
+            r"ArtToolsOSX/",
+            r"UbaAgentHelperMac/",
+            r"overlay-arm64-ios/",
+            r"winuwp/",
+            # Android x86 is deliberately kept: bare x86 also holds WiX 3.8 and
+            # Win32 payload. x86_64 and armeabi-v7a are cut, so they need no
+            # marker. The alternative CEF branch is a version choice, not a
+            # platform marker, so it is not listed either.
         ],
     },
     # -----------------------------------------------------------------------

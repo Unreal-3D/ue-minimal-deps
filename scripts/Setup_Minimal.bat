@@ -70,6 +70,13 @@ rem      Windows consumers (MetalShaderConverter/metalirconverter.dll+.lib, ProR
 rem      windows lib) that the Win64 editor build requires. Mac/iOS payloads are still
 rem      cut by the Mac/IOS platform excludes above. ----
 set "EXCLUDES=%EXCLUDES% -exclude=Unix -exclude=macos -exclude=osx -exclude=linux64"
+rem ---- Platform payload outside the Win64 + Android arm64 scope ----
+rem WinArm64 is a separate segment from Win64: the .NET win-arm64 pack is cut
+rem above, but the platform payload needs its own pattern. The rest are macOS
+rem (ArtToolsOSX, UbaAgentHelperMac), Linux (LinuxArm64/LinuxAArch64/linux32/
+rem linuxarm), iOS (the vcpkg triplet) and UWP. Do NOT exclude WinRT: it also
+rem contains Win64 FreeType libraries (Lib/WinRT/Win64/freetype*.lib).
+set "EXCLUDES=%EXCLUDES% -exclude=WinArm64 -exclude=ArtToolsOSX -exclude=UbaAgentHelperMac -exclude=LinuxArm64 -exclude=LinuxAArch64 -exclude=linux32 -exclude=linuxarm -exclude=overlay-arm64-ios -exclude=winuwp"
 rem ---- PhysX3 leftovers (only consumer ApexDestruction plugin is disabled by default) ----
 set "EXCLUDES=%EXCLUDES% -exclude=PhysX3"
 rem ---- CEF non-win64 dirs (keep both win64 versions: editor WebBrowser/Insights need them) ----
@@ -78,7 +85,7 @@ set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_128.4.13+ge76af7e+chromium-128.0.66
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_128.4.13+ge76af7e+chromium-128.0.6613.138_windowsarm64"
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_linux64"
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_windowsarm64"
-rem ---- Android ABIs: arm64-v8a only ----
+rem ---- Android ABIs: arm64-v8a (+ a deliberate x86 residue) ----
 rem Drops 32-bit ARM (armeabi-v7a) and the x86_64 emulator ABI. Comment out these
 rem two lines if you need emulator or armeabi-v7a packaging.
 rem Deliberately NOT excluded: bare "-exclude=x86". The Android x86 payloads are
