@@ -20,20 +20,30 @@ rem     Setup_Minimal.bat --prompt  prompt before overwriting modified files
 rem
 rem  Notes:
 rem   1. Excluded files are NOT downloaded and NOT deleted. To stay minimal,
-rem      always sync through this script; running plain Setup.bat fills
-rem      everything back in.
+rem      always sync through this script. The managed .gitdepsignore written
+rem      below is read by plain Setup.bat too, so it no longer re-downloads the
+rem      platform payload; delete that file to restore a full sync.
 rem   2. Setup.bat writes these args into .git\hooks\post-checkout and
 rem      post-merge, so future "git pull" auto-syncs reuse the same excludes.
 rem      This script rewrites both hooks after every run with only the excludes,
 rem      so a "dry" or "--force" run never leaves those flags behind.
-rem   3. TIER B excludes the MetaHuman plugin family. MetaHumanSDK is
-rem      EnabledByDefault:true - disable MetaHumanSDK in your projects and
-rem      verify UnrealEditor builds BEFORE using this. If you need MetaHuman,
-rem      comment out the two TIER B lines below.
+rem   3. TIER B excludes the MetaHuman plugin family and Protobuf. Prereq:
+rem      disable both the MetaHuman and Bridge plugins in your projects and
+rem      verify UnrealEditor builds BEFORE using this. 5.8.3 ships MetaHumanSDK
+rem      with EnabledByDefault:false, but Bridge is enabled by default and
+rem      depends on MetaHumanSDK, so disabling only MetaHuman still links
+rem      MetaHumanSDKEditor against the cut Protobuf libraries. If you need
+rem      MetaHuman, comment out the two TIER B lines below.
 rem   4. Localization is excluded: editor UI will be English-only.
 rem   5. After engine updates (git pull to a new version) CEF folder names and
 rem      the manifest change: run "dry" first; if a parameter becomes invalid,
 rem      re-check the CEF block below against Engine\Build\Commit.gitdeps.xml.
+rem   6. Three bare segment cuts (IOS, mac-x64, linux-x64) live in the managed
+rem      .gitdepsignore instead of EXCLUDES, because each also matches inputs
+rem      that UBT/UAT need on this host. GitDependencies cannot re-include a
+rem      path already cut by -exclude, so the ignore file carries the cut and
+rem      the "!" exceptions (AutomationTool/IOS/Resources and the three
+rem      EpicGames.Perforce.Native builds copied by EpicGames.Perforce.csproj).
 rem =====================================================================
 
 if not exist "Setup.bat" (
@@ -61,9 +71,15 @@ for %%I in ("%REPO_GIT_DIR%") do set "REPO_GIT_DIR=%%~fI"
 set "HOOKS_DIR=%REPO_GIT_DIR%\hooks"
 
 rem ---- Other platform dirs ----
-set "EXCLUDES=%EXCLUDES% -exclude=Mac -exclude=IOS -exclude=TVOS -exclude=Linux -exclude=VisionOS -exclude=Win32"
+rem NOTE: bare "IOS" is handled by the managed .gitdepsignore below; it would
+rem also cut Engine/Source/Programs/AutomationTool/IOS, which UAT compiles.
+set "EXCLUDES=%EXCLUDES% -exclude=Mac -exclude=TVOS -exclude=Linux -exclude=VisionOS -exclude=Win32"
 rem ---- DotNet runtime packs for other RIDs ----
-set "EXCLUDES=%EXCLUDES% -exclude=mac-x64 -exclude=mac-arm64 -exclude=osx-x64 -exclude=osx-arm64 -exclude=linux-x64 -exclude=linux-arm64 -exclude=win-arm64"
+rem NOTE: bare "mac-x64" and "linux-x64" are handled by .gitdepsignore; each also
+rem matches EpicGames.Perforce.Native/{mac-x64,linux-x64}, which
+rem EpicGames.Perforce.csproj copies unconditionally when UAT compiles its script
+rem modules. win-x64 is the host here and stays.
+set "EXCLUDES=%EXCLUDES% -exclude=mac-arm64 -exclude=osx-x64 -exclude=osx-arm64 -exclude=linux-arm64 -exclude=win-arm64"
 rem ---- Leftover platform segments (abseil/Boost/Steamworks etc.). NOTE: do NOT exclude
 rem      "Apple" as a segment - Engine/{Binaries,Source}/ThirdParty/Apple also holds
 rem      Windows consumers (MetalShaderConverter/metalirconverter.dll+.lib, ProResLib
@@ -116,21 +132,32 @@ rem set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/HarfBuzz/harfbuz
 rem ---- P4 full removal: ACTIVE. Requires PerforceSourceControl/ChangelistReview
 rem      plugins disabled (their .uplugin EnabledByDefault was flipped to false,
 rem      .bak backups alongside), otherwise the editor build still needs
-rem      p4api-2021.2. The prebuilt Binaries/DotNET/EpicGames.Perforce.Native.dll
-rem      is NOT excluded - UAT needs it. To restore P4 support: restore the .bak
-rem      files and remove this line, then re-sync. ----
+rem      p4api-2021.2. The prebuilt Binaries/DotNET/EpicGames.Perforce.Native
+rem      builds are NOT excluded - UAT needs all three RIDs, and the managed
+rem      .gitdepsignore below carries the mac-x64/linux-x64 exceptions. To
+rem      restore P4 support: restore the .bak files and remove this line, then
+rem      re-sync. ----
 set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Perforce -exclude=/Engine/Extras/P4VUtils"
 
 rem ---- Arguments ----------------------------------------------------------
-rem "dry" is only recognised as the first argument. Capture the remaining
-rem arguments too, so "Setup_Minimal.bat dry --force" previews a forced
-rem overwrite instead of silently dropping --force.
+rem "dry" is recognized anywhere before the flags. `shift` does not change %*,
+rem so the remainder has to be rebuilt token by token (a plain
+rem `set "REST=%*"` after shift would leave "dry" in the list and reject it).
 set "WAS_DRY="
-set "REST=%*"
-if /I "%~1"=="dry" set "WAS_DRY=1"
+set "REST="
+:parse_args
+if "%~1"=="" goto parse_args_done
+if /I "%~1"=="dry" (
+    set "WAS_DRY=1"
+    shift
+    goto parse_args
+)
+set "REST=%REST% %~1"
+shift
+goto parse_args
+:parse_args_done
+if defined REST set "REST=%REST:~1%"
 if defined WAS_DRY set "EXTRA=--dry-run"
-if defined WAS_DRY shift
-if defined WAS_DRY set "REST=%*"
 
 rem Setup.bat only recognizes --force/--prompt (double dash) when deciding whether to add
 rem --prompt; passing a bare "-force" or "-prompt" makes GitDependencies receive --prompt
@@ -153,6 +180,45 @@ if defined REST (
     )
 )
 if defined HAS_FORCE if defined HAS_PROMPT goto :bad_combo
+
+rem ---- Managed GitDependencies ignore file -----------------------------------
+rem GitDependencies reads .gitdepsignore from the engine root automatically and
+rem applies "!" rules in order (last match wins). This is the only way to cut a
+rem coarse platform segment while keeping a few files inside it: -exclude is
+rem evaluated before the ignore file, so an exception cannot rescue a path that
+rem -exclude already removed.
+rem   **/IOS/**                 iOS payload (3.1 GiB)
+rem   !**/AutomationTool/IOS/Resources/*.png UAT compiles IOS.Automation on every host
+rem   **/mac-x64/**             other .NET runtime pack / Mac payload
+rem   !**/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib
+rem   **/linux-x64/**           other .NET runtime pack / Linux payload
+rem   !**/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so
+rem The three Perforce natives (win-x64, mac-x64, linux-x64) are copied by
+rem Engine/Source/Programs/Shared/EpicGames.Perforce/EpicGames.Perforce.csproj
+rem when UAT compiles its script modules, even on a Windows-only host.
+set "IGNORE_RULES=**/IOS/**;!**/AutomationTool/IOS/Resources/*.png;**/mac-x64/**;!**/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib;**/linux-x64/**;!**/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so"
+
+if exist ".gitdepsignore" (
+    findstr /b /c:"# Generated by Setup_Minimal" ".gitdepsignore" >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] .gitdepsignore exists and was not generated by this profile.
+        echo [ERROR] Move it aside or merge these rules into it, then re-run:
+        echo          %IGNORE_RULES:;= %
+        popd
+        exit /b 2
+    )
+)
+> ".gitdepsignore" echo # Generated by Setup_Minimal.bat - re-run that script to refresh.
+rem Written one rule per line: a FOR over the concatenated list would treat the
+rem "*.png" rule as a wildcard set and silently emit nothing when it matches no
+rem file in the current directory.
+>> ".gitdepsignore" echo **/IOS/**
+>> ".gitdepsignore" echo !**/AutomationTool/IOS/Resources/*.png
+>> ".gitdepsignore" echo **/mac-x64/**
+>> ".gitdepsignore" echo !**/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib
+>> ".gitdepsignore" echo **/linux-x64/**
+>> ".gitdepsignore" echo !**/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so
+echo [Setup_Minimal] Managed .gitdepsignore written.
 
 echo.
 echo [Setup_Minimal] Args:

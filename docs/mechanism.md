@@ -109,17 +109,51 @@ directory name is too generic to use as a segment — `-exclude=/Engine/Plugins/
 removes the plugin family without any risk of matching an unrelated `MetaHuman`
 directory elsewhere.
 
+## `.gitdepsignore`: cuts with exceptions
+
+`-exclude` has no include counterpart: once a path matches, it is gone. That is a
+problem for segments that also hold build-tool inputs. `IOS` is the clearest
+example — it covers 3.1 GiB of iOS payload, but also
+`Engine/Source/Programs/AutomationTool/IOS/Resources/*.png`, which UAT needs to
+compile `IOS.Automation` on every host, including Windows and Linux.
+
+GitDependencies reads `<engine>/.gitdepsignore` automatically (`Program.cs:388`).
+Its parser is small and is reproduced in `tools/gitdeps_audit.py`:
+
+- `?` matches one character, `*` one path component, `**` any number of them.
+- A leading `!` flips the rule into an include.
+- Rules are applied in file order; the **last match wins**.
+- The ignore file is consulted *after* `-exclude`, so it can only subtract more;
+  it cannot bring back a path `-exclude` already removed.
+
+The profiles therefore move the coarse segment cut into `.gitdepsignore` and
+follow it with an exception:
+
+```
+**/IOS/**
+!**/AutomationTool/IOS/Resources/*.png
+```
+
+This is why the scripts no longer carry `-exclude=IOS`, `-exclude=mac-x64`,
+`-exclude=linux-x64` or, on macOS/Linux, `-exclude=win-x64`: each of those
+segments also matches a file UAT copies. The ignore file is written on every run
+(dry-runs included), refuses to overwrite a file it did not generate, and is
+read by plain `Setup.sh` / `Setup.bat` as well.
+
 ## Excluded means "not downloaded and not deleted"
 
-The matcher is applied in exactly two places:
+The matcher and the `.gitdepsignore` rules are applied together in exactly two
+places:
 
 - `Program.cs:507` — when building the list of files to download
 - `Program.cs:565` — when building the list of files to remove
 
 So an excluded file is neither fetched nor deleted. On a fresh clone that is
 exactly what you want. On an existing full tree it means the files you already
-have simply stay there, and **a plain `Setup.sh` will fill everything back in**,
-because the stock script passes no excludes. Always sync through a profile.
+have simply stay there. The stock script passes no excludes, but the managed
+`.gitdepsignore` is still read, so a plain `Setup.sh` / `Setup.bat` keeps the
+platform payload out; delete that file (and sync without a profile) to fill the
+tree back in.
 
 ## Exit codes are not trustworthy
 
@@ -241,8 +275,10 @@ three profiles write only the exclude list into the hooks.
 `tools/gitdeps_audit.py` is a faithful port of `IsExcludedFolder`, and its
 `--selftest` pins 29 cases against the behaviour above — including the
 `Mac`/`mac-arm64` and `Unix`/`Mac` distinctions, the prefix form, and
-case-insensitivity. If a future engine version changes the matcher, the selftest
-and the audit both go red.
+case-insensitivity. It also implements the `.gitdepsignore` parser and applies
+the ignore rules after `-exclude`, so a reported cut names the layer that
+actually removed the path. If a future engine version changes either matcher,
+the selftest and the audit both go red.
 
 The audit adds three checks on top of the matcher:
 

@@ -221,33 +221,41 @@ single best argument for having an audit tool rather than trusting a list. The
 | Pattern | Occurrences outside `ThirdParty/DotNet/` | Safe as a bare segment? |
 |---|---|---|
 | `mac-arm64` | 0 | Yes, anywhere |
-| `mac-x64` | 2 — `EpicGames.Perforce.Native/mac-x64/{Debug,Release}/EpicGames.Perforce.Native.dylib` | Only on Intel |
+| `mac-x64` | 2 — `EpicGames.Perforce.Native/mac-x64/{Debug,Release}/EpicGames.Perforce.Native.dylib` | No |
 | `linux-arm64` | 0 | Yes, anywhere |
-| `linux-x64` | 8 — `EpicGames.Perforce.Native/linux-x64/*`, `Android/UnrealAndroidFileTool/linux-x64/*`, `OidcToken/linux-x64/*` | Only on x86_64 |
+| `linux-x64` | 8 — `EpicGames.Perforce.Native/linux-x64/*`, `Android/UnrealAndroidFileTool/linux-x64/*`, `OidcToken/linux-x64/*` | No |
+| `win-x64` | 4 — `EpicGames.Perforce.Native/win-x64/{Debug,Release}/EpicGames.Perforce.Native.{dll,lib}` | No |
 
-`EpicGames.Perforce.Native` has no arm64 build on either platform, and the
-Android deploy tool and OidcToken helper exist only as `linux-x64`. So excluding
-the bare segment on the ARM branch of each profile would silently take the
-Perforce integration and the Android deploy tool with it.
+`EpicGames.Perforce.Native` has no arm64 build on any platform, and the Android
+deploy tool and OidcToken helper exist only as `linux-x64`. There is a second,
+easier-to-miss constraint: UAT compiles every automation script module on every
+host, and `Engine/Source/Programs/Shared/EpicGames.Perforce/EpicGames.Perforce.csproj`
+copies **all three** RID builds unconditionally. A profile that cuts `win-x64` on
+macOS, or `linux-x64` on Windows, therefore breaks UAT even though the host never
+loads those libraries.
 
-Both scripts therefore root-anchor the cut to the DotNet tree on the ARM branch:
+`-exclude` cannot express "cut this segment, keep these files": it is evaluated
+before `.gitdepsignore`, so an exception cannot rescue a path it already
+removed. The profiles therefore put the RID cuts in the managed
+`<engine>/.gitdepsignore`, which GitDependencies reads automatically, and use its
+`!` include rules for the required paths:
 
 ```
--exclude=/Engine/Binaries/ThirdParty/DotNet/8.0.300/mac-x64
--exclude=/Engine/Binaries/ThirdParty/DotNet/8.0.412/mac-x64
--exclude=/Engine/Binaries/ThirdParty/DotNet/8.0.300/linux-x64
--exclude=/Engine/Binaries/ThirdParty/DotNet/8.0.412/linux-x64
+**/mac-x64/**
+!**/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib
+**/linux-x64/**
+!**/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so
 ```
 
-The scripts read the version out of the manifest at run time (the
-`DOTNET_VERSIONS` block) rather than hard-coding it, and the audit expands the
-same loop. The cut is still version-specific, so a manifest with a different
-DotNet layout reports it as stale. A deliberate trade: the failure mode of a
-stale pin is an extra ~9 GB download, while the failure mode of the bare pattern
-is a broken Perforce integration or a missing Android deploy tool, with no
-warning at all.
+Rules are applied in file order and the last match wins. The exception is
+narrowed to `Release` because that is the configuration
+`EpicGames.Perforce.csproj` copies; the `Debug` build stays cut and is declared
+in the audit. The host's own RID is never cut, and on aarch64 Linux the
+`UnrealAndroidFileTool` and `OidcToken` exceptions are added because those host
+tools only ship as `linux-x64`.
 
-The x64 branches get to use the bare form, which is version-agnostic.
+This is version-agnostic: it does not need the `DotNet/<version>` segment and
+survives engine upgrades, unlike the old root-anchored pins.
 
 ### The Linux architecture split has four spellings
 

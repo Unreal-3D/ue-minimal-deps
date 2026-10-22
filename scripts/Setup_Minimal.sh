@@ -16,8 +16,9 @@
 #
 #  Notes:
 #   1. Excluded files are NOT downloaded and NOT deleted. To stay minimal,
-#      always sync through this script - a plain ./Setup.sh fills everything
-#      back in.
+#      always sync through this script. The managed .gitdepsignore written
+#      below is read by plain ./Setup.sh too, so it no longer re-downloads the
+#      platform payload; delete that file to restore a full sync.
 #   2. Setup.sh registers .git/hooks/{post-checkout,post-merge} as symlinks to
 #      GitDependenciesHook.sh, which runs GitDependencies with NO arguments, so
 #      a plain "git pull" would re-download every platform. This script
@@ -52,6 +53,10 @@
 #      and the tvOS workload manifest - both are inert on Mac but only ~100
 #      files). Measured result on this 5.7.4 manifest: 146,315 files -> 86,734
 #      kept, 59,581 excluded (40.7%).
+#   9. UAT compiles every automation script module on every host, and
+#      EpicGames.Perforce.csproj copies all three EpicGames.Perforce.Native
+#      builds unconditionally. The non-host RIDs and their Perforce exceptions
+#      therefore live in the managed .gitdepsignore (see the RID block below).
 # =====================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -74,20 +79,6 @@ case "$HOST_ARCH" in
 		HOST_ARCH="x86_64"
 		;;
 esac
-
-# ---- .NET runtime-pack versions --------------------------------------------
-# The ARM branch below has to name the DotNet tree explicitly, because no
-# path-segment pattern can select "the .NET pack for this host" without also
-# matching the host tools that share the same segment (see the comment further
-# down). Enumerate the versions from the manifest instead of hard-coding one: the
-# set changes between engine releases (5.7.4 ships 8.0.300 and 8.0.412, 5.8.3
-# ships 10.0), and a stale pin stops excluding anything at all, silently.
-DOTNET_VERSIONS=$(sed -n 's|.*ThirdParty/DotNet/\([0-9][0-9.]*\)/.*|\1|p' \
-	Engine/Build/Commit.gitdeps.xml 2>/dev/null | sort -u)
-if [ -z "$DOTNET_VERSIONS" ]; then
-	echo "[WARN] No DotNet runtime-pack versions found in Engine/Build/Commit.gitdeps.xml." >&2
-	echo "[WARN] The other-architecture runtime pack will not be excluded." >&2
-fi
 
 # ---- Resolve GIT_DIR once, before Setup.sh runs, and share it with Setup.sh --
 if [ -z "${GIT_DIR:-}" ]; then
@@ -145,31 +136,48 @@ EXCLUDES+=(
 # Engine/Binaries/ThirdParty/DotNet/{8.0.300,8.0.412}/<rid> - by far the biggest
 # single win, ~57k of the manifest's 146k files across all six RIDs. A host only
 # ever executes its own; SetupDotnet.sh picks mac-$ARCH straight from uname -m.
+# The non-host x64 RIDs are in the managed .gitdepsignore below: each also
+# matches EpicGames.Perforce.Native, which UAT needs.
 EXCLUDES+=(
-	-exclude=linux-x64
 	-exclude=linux-arm64
-	-exclude=win-x64
 	-exclude=win-arm64
 	-exclude=win-x86
 )
 
-# Which Mac pack to drop depends on the host, and the two branches are spelled
-# differently on purpose:
+# Which Mac pack to drop depends on the host:
 #   * bare "mac-arm64" occurs nowhere in the manifest except the DotNet tree, so
 #     it is safe as a plain segment pattern;
 #   * "mac-x64" also appears under EpicGames.Perforce.Native - the only Perforce
-#     native library that exists for Mac - so on Apple Silicon the cut has to be
-#     root-anchored to the DotNet tree to leave it alone.
+#     native library that exists for Mac - so on Apple Silicon the cut (and its
+#     exception) lives in .gitdepsignore.
 # Mac platform binaries and the Mac/arm64 third-party lib dirs are kept on both
 # hosts, so a universal editor still builds either way.
 if [ "$HOST_ARCH" = "arm64" ]; then
 	KEEP_RID="mac-arm64"
-	for DOTNET_VERSION in $DOTNET_VERSIONS; do
-		EXCLUDES+=("-exclude=/Engine/Binaries/ThirdParty/DotNet/$DOTNET_VERSION/mac-x64")
-	done
 else
 	KEEP_RID="mac-x64"
 	EXCLUDES+=(-exclude=mac-arm64)
+fi
+
+# ---- Managed GitDependencies ignore rules -----------------------------------
+# GitDependencies reads .gitdepsignore from the engine root automatically and
+# applies "!" rules in order (last match wins). This is the only way to cut a
+# coarse platform segment while keeping a few files inside it: a path already
+# removed by -exclude cannot be rescued by the ignore file.
+# UAT compiles every automation script module on every host, and
+# EpicGames.Perforce.csproj copies win-x64, mac-x64 and linux-x64
+# EpicGames.Perforce.Native builds unconditionally, so all three must survive.
+IGNORE_RULES=(
+	'**/win-x64/**'
+	'!**/EpicGames.Perforce.Native/win-x64/Release/EpicGames.Perforce.Native.dll'
+	'**/linux-x64/**'
+	'!**/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so'
+)
+if [ "$HOST_ARCH" = "arm64" ]; then
+	IGNORE_RULES+=(
+		'**/mac-x64/**'
+		'!**/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib'
+	)
 fi
 
 # ---- CEF builds for other platforms ----------------------------------------
@@ -229,8 +237,9 @@ EXCLUDES+=(
 # =====================================================================
 #
 # ---- MetaHuman plugin family (~2.9 GiB) ----
-# Prereq: disable the MetaHumanSDK plugin in your projects and verify
-# UnrealEditor still builds BEFORE relying on this.
+# Prereq: disable the MetaHuman AND Bridge plugins in your projects and verify
+# UnrealEditor still builds BEFORE relying on this (Bridge is enabled by default
+# and depends on MetaHumanSDK, which links the cut Protobuf libraries).
 # EXCLUDES+=(
 # 	-exclude=/Engine/Plugins/MetaHuman
 # 	-exclude=/Engine/Source/ThirdParty/Protobuf
@@ -335,6 +344,18 @@ if [ "$HAS_FORCE" -eq 1 ] && [ "$HAS_PROMPT" -eq 1 ]; then
 	echo "[ERROR] --force and --prompt are mutually exclusive; GitDependencies rejects both together." >&2
 	exit 2
 fi
+
+if [ -e .gitdepsignore ] && ! head -n 1 .gitdepsignore | grep -q '^# Generated by Setup_Minimal'; then
+	echo "[ERROR] .gitdepsignore exists and was not generated by this profile." >&2
+	echo "[ERROR] Move it aside or merge these rules into it, then re-run:" >&2
+	for RULE in "${IGNORE_RULES[@]}"; do echo "         $RULE" >&2; done
+	exit 2
+fi
+{
+	echo '# Generated by Setup_Minimal.sh - re-run that script to refresh.'
+	for RULE in "${IGNORE_RULES[@]}"; do echo "$RULE"; done
+} > .gitdepsignore
+echo "[Setup_Minimal] Managed .gitdepsignore written."
 
 echo
 echo "[Setup_Minimal] Host arch  : $HOST_ARCH (keeping the $KEEP_RID .NET runtime pack)"
