@@ -39,6 +39,15 @@ A bare name is therefore a whole-path-SEGMENT match, not a substring match.
 "Unix-like platforms" - it means the literal segment "Unix", which in UE holds
 only x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnueabi payloads.
 
+The profiles also write a managed <engine>/.gitdepsignore. GitDependencies reads
+it automatically, and its "!" rules are applied in file order with the last match
+winning. That is the only way to express "cut this whole platform segment, but
+keep a few files inside it": a path removed by -exclude is already gone before
+the ignore file is consulted. The audit models both layers and reports which one
+cut a path. MUST-KEEP paths are load-bearing for UBT/UAT on the host: the
+AutomationTool iOS resources and all three EpicGames.Perforce.Native builds that
+EpicGames.Perforce.csproj copies when UAT compiles its script modules.
+
 Usage (the tools live in this repo, but they read an engine tree):
     cd /path/to/UnrealEngine
     /path/to/ue-minimal-deps/tools/gitdeps_audit.py --profile macos
@@ -105,6 +114,56 @@ class Matcher:
         staleness, and the two need different fixes.
         """
         return self._hit(("/" + name).lower(), pattern)
+
+
+def _ignore_regex(rule: str):
+    """Port of GitDependencies' IgnoreFile line parser.
+
+    `?` matches one character, `*` one path component, `**` any number of
+    components. A leading `!` is stripped by the caller and flips the rule into
+    an include. Rules are matched in file order and the LAST match wins, which is
+    what lets a profile cut a whole segment and re-include a few files.
+    """
+    line = rule.strip().replace("\\", "/")
+    pattern = "^" + re.escape(line)
+    pattern = pattern.replace(r"\?", ".")
+    pattern = pattern.replace(r"\*\*", ".*")
+    pattern = pattern.replace(r"\*", "[^/]*")
+    if not pattern.startswith("^/"):
+        pattern = pattern[1:]
+    if pattern.endswith("/$"):
+        pattern = pattern[:-1]
+    return re.compile(pattern, re.IGNORECASE)
+
+
+class IgnoreRules:
+    """The `!`-aware rules GitDependencies reads from <engine>/.gitdepsignore."""
+
+    def __init__(self, rules):
+        self.rules = []
+        for raw in rules:
+            raw = raw.strip()
+            if not raw:
+                continue
+            included = raw.startswith("!")
+            body = raw[1:].lstrip() if included else raw
+            self.rules.append((raw, _ignore_regex(body), not included))
+
+    def which(self, name: str):
+        """Return the exclude rule that wins for this path, or None."""
+        path = "/" + name.replace("\\", "/")
+        winner = None
+        for raw, rx, excludes in self.rules:
+            if rx.search(path):
+                winner = (raw, excludes)
+        if winner is not None and winner[1]:
+            return winner[0]
+        return None
+
+    def direct(self, name: str) -> bool:
+        return bool(self.rules) and any(rx.search("/" + name.replace("\\", "/"))
+                                        for _, rx, excludes in self.rules if excludes)
+
 
 
 SELFTEST_CASES = [
@@ -238,6 +297,61 @@ def load_profile_excludes(name: str, scripts_dir: pathlib.Path, host_arch: str,
     return parse_sh_excludes(text, host_arch, dotnet_versions)
 
 
+def parse_bat_ignore_rules(text: str) -> list[str]:
+    """Rules from `set "IGNORE_RULES=a;b;c"` in the Windows profile."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(("rem", "::")):
+            continue
+        m = re.search(r'set "IGNORE_RULES=(.*)"', stripped)
+        if m:
+            return [r for r in m.group(1).split(";") if r]
+    return []
+
+
+def parse_sh_ignore_rules(text: str, host_arch: str) -> list[str]:
+    """Rules from `IGNORE_RULES+=( 'a' 'b' )` blocks, honouring the arch branch."""
+    out = []
+    branch = None
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = re.match(r'^if \[ "\$HOST_ARCH" = "(arm64|x86_64)" \];? then$', stripped)
+        if m:
+            branch = m.group(1)
+            continue
+        if branch is not None and stripped == "else":
+            branch = "arm64" if branch == "x86_64" else "x86_64"
+            continue
+        if branch is not None and stripped == "fi":
+            branch = None
+            inside = False
+            continue
+        if branch is not None and branch != host_arch:
+            continue
+        if "IGNORE_RULES=(" in stripped or "IGNORE_RULES+=(" in stripped:
+            inside = True
+            stripped = re.split(r"IGNORE_RULES(?:\+)?=\(", stripped, maxsplit=1)[1]
+        if inside:
+            if ")" in stripped:
+                stripped = stripped.split(")", 1)[0]
+                inside = False
+            out.extend(re.findall(r"'([^']+)'", stripped))
+    return out
+
+
+def load_profile_ignore_rules(name: str, scripts_dir: pathlib.Path, host_arch: str) -> list[str]:
+    script = scripts_dir / DEFAULT_SCRIPTS[name]
+    if not script.exists():
+        sys.exit(f"error: profile script not found: {script}")
+    text = script.read_text()
+    if script.suffix == ".bat":
+        return parse_bat_ignore_rules(text)
+    return parse_sh_ignore_rules(text, host_arch)
+
+
 # ---------------------------------------------------------------------------
 # per-profile audit metadata
 # ---------------------------------------------------------------------------
@@ -278,6 +392,11 @@ PROFILES = {
             r"vcpkg-installed/(overlay-arm64-ios|overlay-x64_arm64-osx|arm64-android)/",
         ],
         "declared_cuts": [
+            (r"EpicGames\.Perforce\.Native/[a-z0-9-]+/Release/EpicGames\.Perforce\.Native\.(debug|sym)$",
+             "debug symbols that ship next to the Perforce native; UAT copies only the library"),
+            (r"EpicGames\.Perforce\.Native/[a-z0-9-]+/Debug/",
+             "the Debug Perforce native build; EpicGames.Perforce.csproj copies only Release, "
+             "and Release is re-included by .gitdepsignore where the RID is cut"),
             (r"DotNet/[0-9.]+/(linux-x64|linux-arm64|win-x64|win-arm64)/",
              "non-host .NET runtime packs"),
             # must stay ahead of the broad Mac-RID rule below: it is the more
@@ -334,8 +453,15 @@ PROFILES = {
             # --- host .NET tooling that UBT/UAT actually execute ------------
             "Engine/Binaries/DotNET/OidcToken/osx-x64/OidcToken",
             # the only Perforce native library that exists for Mac - no arm64
-            # build, so it has to survive on an Apple Silicon host too
+            # build, so it has to survive on an Apple Silicon host too. UAT also
+            # copies the win-x64 and linux-x64 builds unconditionally, so the
+            # profile re-includes all three via .gitdepsignore.
             "Engine/Binaries/DotNET/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib",
+            "Engine/Binaries/DotNET/EpicGames.Perforce.Native/win-x64/Release/EpicGames.Perforce.Native.dll",
+            "Engine/Binaries/DotNET/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so",
+            # UAT compiles IOS.Automation on every host
+            "Engine/Source/Programs/AutomationTool/IOS/Resources/GreenCheck.png",
+            "Engine/Source/Programs/AutomationTool/IOS/Resources/GreyCheck.png",
             # --- iOS --------------------------------------------------------
             "Engine/Build/IOS/AppleRootCA.pem",
             "Engine/Build/IOS/ConfigRulesTool/ConfigRulesTool.app/Contents/MacOS/ConfigRulesTool",
@@ -397,6 +523,11 @@ PROFILES = {
             r"vcpkg-installed/(arm64-android|x64-windows)/",
         ],
         "declared_cuts": [
+            (r"EpicGames\.Perforce\.Native/[a-z0-9-]+/Release/EpicGames\.Perforce\.Native\.(debug|sym)$",
+             "debug symbols that ship next to the Perforce native; UAT copies only the library"),
+            (r"EpicGames\.Perforce\.Native/[a-z0-9-]+/Debug/",
+             "the Debug Perforce native build; EpicGames.Perforce.csproj copies only Release, "
+             "and Release is re-included by .gitdepsignore where the RID is cut"),
             (r"DotNet/[0-9.]+/win-arm64/",
              "Windows-on-ARM .NET runtime pack - the host is x64. The Windows RIDs are the only "
              "ones that ship all three Windows host packs, so this RID also carries a copy of the "
@@ -453,6 +584,15 @@ PROFILES = {
             "Engine/Binaries/DotNET/OidcToken/win-x64/OidcToken.exe",
             "Engine/Binaries/DotNET/CsvTools/runtimes/win-x64/native/e_sqlite3.dll",
             "Engine/Source/ThirdParty/Android/cxa_demangle/arm64-v8a/libcxa_demangle.a",
+            # UAT compiles every automation script module on every host, and
+            # EpicGames.Perforce.csproj copies all three Perforce natives
+            # unconditionally. -exclude runs before .gitdepsignore, so the
+            # profile expresses these cuts in .gitdepsignore with "!" exceptions.
+            "Engine/Binaries/DotNET/EpicGames.Perforce.Native/win-x64/Release/EpicGames.Perforce.Native.dll",
+            "Engine/Binaries/DotNET/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib",
+            "Engine/Binaries/DotNET/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so",
+            "Engine/Source/Programs/AutomationTool/IOS/Resources/GreenCheck.png",
+            "Engine/Source/Programs/AutomationTool/IOS/Resources/GreyCheck.png",
         ],
         "dropped_markers": [
             # These are deliberately broad: a payload can move between trees
@@ -503,6 +643,11 @@ PROFILES = {
             r"/linuxarm/",
         ],
         "declared_cuts": [
+            (r"EpicGames\.Perforce\.Native/[a-z0-9-]+/Release/EpicGames\.Perforce\.Native\.(debug|sym)$",
+             "debug symbols that ship next to the Perforce native; UAT copies only the library"),
+            (r"EpicGames\.Perforce\.Native/[a-z0-9-]+/Debug/",
+             "the Debug Perforce native build; EpicGames.Perforce.csproj copies only Release, "
+             "and Release is re-included by .gitdepsignore where the RID is cut"),
             (r"DotNet/[0-9.]+/(mac-x64|mac-arm64|win-x64|win-arm64)/",
              "non-host .NET runtime packs"),
             (r"DotNet/[0-9.]+/[a-z0-9-]+/sdk/.*/(runtimes/unix|TestHostNetFramework/x86)/",
@@ -573,8 +718,14 @@ PROFILES = {
             "Engine/Binaries/DotNET/Android/UnrealAndroidFileTool/linux-x64/UnrealAndroidFileTool",
             "Engine/Binaries/DotNET/OidcToken/linux-x64/OidcToken",
             # the only Perforce native library that exists for Linux, and it sits
-            # under the same linux-x64 segment as the .NET runtime pack
+            # under the same linux-x64 segment as the .NET runtime pack. UAT also
+            # copies the win-x64 and mac-x64 builds unconditionally.
             "Engine/Binaries/DotNET/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so",
+            "Engine/Binaries/DotNET/EpicGames.Perforce.Native/win-x64/Release/EpicGames.Perforce.Native.dll",
+            "Engine/Binaries/DotNET/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib",
+            # UAT compiles IOS.Automation on every host
+            "Engine/Source/Programs/AutomationTool/IOS/Resources/GreenCheck.png",
+            "Engine/Source/Programs/AutomationTool/IOS/Resources/GreyCheck.png",
             "Engine/Binaries/ThirdParty/OpenXR/Android/arm64-v8a/libopenxr_loader.so",
             "Engine/Source/ThirdParty/Android/cxa_demangle/arm64-v8a/libcxa_demangle.a",
             # prefix form: the Oodle Android ABI directory and archive name both
@@ -687,17 +838,22 @@ def discover_dotnet_versions(manifest: pathlib.Path) -> list[str]:
 
 
 def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bool,
-          strict: bool, host_arch: str) -> int:
+          strict: bool, host_arch: str, ignore_rules: list[str] | None = None) -> int:
     meta = PROFILES[profile]
     # File names are XML-attribute-escaped; 5.7.4 has one "&amp;" (a licence file),
     # and comparing the raw text would report a present file as absent.
     names = [html.unescape(n)
              for n in re.findall(r'<File Name="([^"]+)"', manifest.read_text(encoding="utf-8"))]
     matcher = Matcher(patterns)
+    ignorer = IgnoreRules(ignore_rules or [])
+
+    def which(name: str):
+        """The -exclude pattern first (it wins at runtime), then the ignore rule."""
+        return matcher.which(name) or ignorer.which(name)
 
     kept, cut = [], []
     for n in names:
-        (cut if matcher(n) else kept).append(n)
+        (cut if which(n) is not None else kept).append(n)
 
     host_arch = "arm64" if host_arch == "arm64" else "x86_64"
     dotnets = discover_dotnet_versions(manifest)
@@ -722,6 +878,7 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
         print(f"engine root    : {engine_root}")
     print(f"host arch      : {host_arch}   DotNet runtime pack versions: {', '.join(dotnets) or 'none found'}")
     print(f"exclude args   : {len(patterns)}")
+    print(f"ignore rules   : {len(ignorer.rules)} (.gitdepsignore, '!' includes last-match-wins)")
     print(f"files          : {len(names)}  kept {len(kept)}  cut {len(cut)} "
           f"({100 * len(cut) / max(len(names), 1):.1f}% excluded)")
     print()
@@ -767,7 +924,11 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
         for p, offender in broken:
             print(f"    X {p}")
             print(f"      e.g. {offender}")
-            print(f"      cut by -exclude={matcher.which(offender)}")
+            exclude_rule = matcher.which(offender)
+            if exclude_rule is not None:
+                print(f"      cut by -exclude={exclude_rule}")
+            else:
+                print(f"      cut by ignore rule={ignorer.which(offender)}")
     print()
 
     # ---- declared vs unexpected cuts -------------------------------------
@@ -789,7 +950,7 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
                     by_reason_examples[reason].append(n)
                 break
         else:
-            key = matcher.which(n) or "?"
+            key = which(n) or "?"
             unexpected[key] += 1
             if len(unexpected_examples[key]) < 3:
                 unexpected_examples[key].append(n)
@@ -808,16 +969,29 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
     if not unexpected:
         print("  (none)")
     for pat, count in unexpected.most_common():
-        print(f"  {count:6d}  matched by -exclude={pat}")
+        label = "-exclude" if pat in matcher.patterns else "ignore rule"
+        print(f"  {count:6d}  matched by {label}={pat}")
         for e in unexpected_examples[pat]:
             print(f"            {e}")
     print()
 
     # ---- misses ----------------------------------------------------------
+    # A must-keep path can legitimately match a "dropped platform" marker: the
+    # AutomationTool IOS resources and the three Perforce natives live inside
+    # platform trees this profile drops, and .gitdepsignore re-includes them for
+    # the host toolchain. They are not leaked savings.
     dropped = [re.compile(p) for p in meta["dropped_markers"]]
+    must_keep_exact = {e for e in must_keep if not e.endswith("/")}
+    must_keep_prefixes = [e for e in must_keep if e.endswith("/")]
+
+    def deliberately_kept(n: str) -> bool:
+        return n in must_keep_exact or any(n.startswith(p) for p in must_keep_prefixes)
+
     missed = collections.Counter()
     missed_examples = collections.defaultdict(list)
     for n in kept:
+        if deliberately_kept(n):
+            continue
         for rx in dropped:
             if rx.search(n):
                 key = rx.pattern
@@ -921,14 +1095,16 @@ def main() -> int:
         explicit=args.manifest is not None,
     )
 
-    # The profiles root-anchor their ARM-branch .NET cut to a versioned directory,
-    # so the version has to be resolved before the exclude list can be read back.
+    # Kept for --from-script profiles that still expand $DOTNET_VERSION in an
+    # exclude pattern; the shipped profiles now express RID cuts in .gitdepsignore.
     dotnet_versions = discover_dotnet_versions(manifest)
 
     if args.from_script:
         text = args.from_script.read_text()
         patterns = parse_bat_excludes(text) if args.from_script.suffix == ".bat" \
             else parse_sh_excludes(text, args.host_arch, dotnet_versions)
+        ignore_rules = parse_bat_ignore_rules(text) if args.from_script.suffix == ".bat" \
+            else parse_sh_ignore_rules(text, args.host_arch)
         profile = args.audit_as or next(
             (p for p, f in DEFAULT_SCRIPTS.items() if f == args.from_script.name), "macos")
         if not args.audit_as and profile == "macos" and args.from_script.name != DEFAULT_SCRIPTS["macos"]:
@@ -937,6 +1113,7 @@ def main() -> int:
     else:
         profile = args.profile
         patterns = load_profile_excludes(profile, args.scripts_dir, args.host_arch, dotnet_versions)
+        ignore_rules = load_profile_ignore_rules(profile, args.scripts_dir, args.host_arch)
 
     if not patterns:
         sys.exit(
@@ -945,7 +1122,8 @@ def main() -> int:
             "       --host-arch selects the branch you meant."
         )
 
-    return audit(manifest, profile, patterns, args.verbose, args.strict, args.host_arch)
+    return audit(manifest, profile, patterns, args.verbose, args.strict, args.host_arch,
+                 ignore_rules)
 
 
 if __name__ == "__main__":

@@ -13,8 +13,9 @@
 #
 #  Notes:
 #   1. Excluded files are NOT downloaded and NOT deleted. To stay minimal,
-#      always sync through this script - a plain ./Setup.sh fills everything
-#      back in.
+#      always sync through this script. The managed .gitdepsignore written
+#      below is read by plain ./Setup.sh too, so it no longer re-downloads the
+#      platform payload; delete that file to restore a full sync.
 #   2. Setup.sh's Linux branch writes the arguments it was given straight into
 #      .git/hooks/{post-checkout,post-merge}. That keeps the exclude list, but
 #      it would also persist per-run flags: a "dry" run leaves --dry-run in the
@@ -30,7 +31,12 @@
 #      Apple/ProResLib/lib/windows - neither exists on Linux.
 #   5. Android is arm64-v8a only (no armeabi-v7a, no x86/x86_64 emulator ABIs).
 #      Comment out the "Android ABIs" block to get them back.
-#   6. Verified against the 5.7.4 manifest with gitdeps_audit.py, but not yet
+#   6. UAT compiles every automation script module on every host, and
+#      EpicGames.Perforce.csproj copies all three EpicGames.Perforce.Native
+#      builds unconditionally. The IOS, mac-x64 and win-x64 cuts (and, on
+#      aarch64, linux-x64) therefore live in the managed .gitdepsignore with
+#      "!" exceptions for AutomationTool/IOS and the Perforce natives.
+#   7. Verified against the 5.7.4 manifest with gitdeps_audit.py, but not yet
 #      field-tested on a real Linux host. The tools stay in the repo (this script
 #      lives in the engine root), so run the audit from the engine root after an
 #      engine update with an absolute path:
@@ -71,20 +77,6 @@ case "$GIT_DIR" in
 esac
 HOOKS_DIR="$GIT_DIR/hooks"
 
-# ---- .NET runtime-pack versions --------------------------------------------
-# The ARM branch below has to name the DotNet tree explicitly, because no
-# path-segment pattern can select "the .NET pack for this host" without also
-# matching the host tools that share the same segment (see the comment further
-# down). Enumerate the versions from the manifest instead of hard-coding one: the
-# set changes between engine releases (5.7.4 ships 8.0.300 and 8.0.412, 5.8.3
-# ships 10.0), and a stale pin stops excluding anything at all, silently.
-DOTNET_VERSIONS=$(sed -n 's|.*ThirdParty/DotNet/\([0-9][0-9.]*\)/.*|\1|p' \
-	Engine/Build/Commit.gitdeps.xml 2>/dev/null | sort -u)
-if [ -z "$DOTNET_VERSIONS" ]; then
-	echo "[WARN] No DotNet runtime-pack versions found in Engine/Build/Commit.gitdeps.xml." >&2
-	echo "[WARN] The other-architecture runtime pack will not be excluded." >&2
-fi
-
 EXCLUDES=()
 
 # ---- Other platform trees ---------------------------------------------------
@@ -92,7 +84,6 @@ EXCLUDES=()
 # therefore different patterns, and neither touches mac-x64.
 EXCLUDES+=(
 	-exclude=Mac
-	-exclude=IOS
 	-exclude=TVOS
 	-exclude=VisionOS
 	-exclude=Win32
@@ -109,6 +100,8 @@ EXCLUDES+=(
 	-exclude=MacOS
 	-exclude=MacOSX
 )
+# NOTE: bare "IOS" is handled by the managed .gitdepsignore below; it would also
+# cut Engine/Source/Programs/AutomationTool/IOS, which UAT compiles.
 
 # ---- Windows-only toolchain trees -------------------------------------------
 EXCLUDES+=(
@@ -125,13 +118,13 @@ EXCLUDES+=(
 
 # ---- .NET runtime packs for platforms we do not build on --------------------
 # Engine/Binaries/ThirdParty/DotNet/{8.0.300,8.0.412}/<rid>. The Linux RID is
-# host-dependent and is handled in the architecture block below.
+# host-dependent and is handled in the architecture block below. mac-x64 and
+# win-x64 also match EpicGames.Perforce.Native, which UAT needs, so those bare
+# cuts live in the managed .gitdepsignore with "!" exceptions.
 EXCLUDES+=(
-	-exclude=mac-x64
 	-exclude=mac-arm64
 	-exclude=osx-x64
 	-exclude=osx-arm64
-	-exclude=win-x64
 	-exclude=win-arm64
 	-exclude=win-x86
 )
@@ -189,21 +182,16 @@ EXCLUDES+=(
 # The two branches are spelled differently on purpose:
 #   * bare "linux-arm64" occurs nowhere in the manifest except the DotNet tree,
 #     so it is safe as a plain segment pattern;
-#   * "linux-x64" also appears under Engine/Binaries/DotNET/ for the Android
+#   * "linux-x64" also appears under Engine/Binaries/DOTNET/ for the Android
 #     deploy tool, the OidcToken helper and EpicGames.Perforce.Native - the only
-#     Perforce native library that exists for Linux - so on aarch64 the cut has
-#     to be root-anchored to the DotNet tree to leave those alone.
-# The version is read out of Engine/Build/Commit.gitdeps.xml at run time (the
-# DOTNET_VERSIONS block above), so it does not need bumping on an engine upgrade.
+#     Perforce native library that exists for Linux - so on aarch64 the cut (and
+#     its exception) lives in .gitdepsignore instead.
 if [ "$HOST_ARCH" = "arm64" ]; then
 	EXCLUDES+=(
 		-exclude=x86_64-unknown-linux-gnu
 		-exclude=linux64
 		-exclude=linux32
 	)
-	for DOTNET_VERSION in $DOTNET_VERSIONS; do
-		EXCLUDES+=("-exclude=/Engine/Binaries/ThirdParty/DotNet/$DOTNET_VERSION/linux-x64")
-	done
 else
 	EXCLUDES+=(
 		-exclude=aarch64-unknown-linux-gnueabi
@@ -219,6 +207,32 @@ else
 	)
 fi
 
+# ---- Managed GitDependencies ignore rules -----------------------------------
+# GitDependencies reads .gitdepsignore from the engine root automatically and
+# applies "!" rules in order (last match wins). This is the only way to cut a
+# coarse platform segment while keeping a few files inside it: a path already
+# removed by -exclude cannot be rescued by the ignore file.
+# UAT compiles every automation script module on every host, and
+# EpicGames.Perforce.csproj copies win-x64, mac-x64 and linux-x64
+# EpicGames.Perforce.Native builds unconditionally, so all three must survive.
+IGNORE_RULES=(
+	'**/IOS/**'
+	'!**/AutomationTool/IOS/Resources/*.png'
+	'**/win-x64/**'
+	'!**/EpicGames.Perforce.Native/win-x64/Release/EpicGames.Perforce.Native.dll'
+	'**/mac-x64/**'
+	'!**/EpicGames.Perforce.Native/mac-x64/Release/EpicGames.Perforce.Native.dylib'
+)
+if [ "$HOST_ARCH" = "arm64" ]; then
+	IGNORE_RULES+=(
+		'**/linux-x64/**'
+		'!**/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so'
+		# x64-only host tools that must survive on an aarch64 Linux host
+		'!**/UnrealAndroidFileTool/linux-x64/**'
+		'!**/OidcToken/linux-x64/**'
+	)
+fi
+
 # =====================================================================
 #  OPTIONAL - size tiers that trade functionality for disk.
 # =====================================================================
@@ -227,8 +241,9 @@ fi
 # EXCLUDES+=( -exclude=/Engine/Content/Localization )
 #
 # ---- MetaHuman plugin family ----
-# Prereq: disable the MetaHumanSDK plugin in your projects and verify the editor
-# still builds BEFORE relying on this.
+# Prereq: disable the MetaHuman AND Bridge plugins in your projects and verify
+# the editor still builds BEFORE relying on this (Bridge is enabled by default
+# and depends on MetaHumanSDK, which links the cut Protobuf libraries).
 # EXCLUDES+=(
 # 	-exclude=/Engine/Plugins/MetaHuman
 # 	-exclude=/Engine/Source/ThirdParty/Protobuf
@@ -319,6 +334,18 @@ if [ "$HAS_FORCE" -eq 1 ] && [ "$HAS_PROMPT" -eq 1 ]; then
 	echo "[ERROR] --force and --prompt are mutually exclusive; GitDependencies rejects both together." >&2
 	exit 2
 fi
+
+if [ -e .gitdepsignore ] && ! head -n 1 .gitdepsignore | grep -q '^# Generated by Setup_Minimal'; then
+	echo "[ERROR] .gitdepsignore exists and was not generated by this profile." >&2
+	echo "[ERROR] Move it aside or merge these rules into it, then re-run:" >&2
+	for RULE in "${IGNORE_RULES[@]}"; do echo "         $RULE" >&2; done
+	exit 2
+fi
+{
+	echo '# Generated by Setup_Minimal_linux.sh - re-run that script to refresh.'
+	for RULE in "${IGNORE_RULES[@]}"; do echo "$RULE"; done
+} > .gitdepsignore
+echo "[Setup_Minimal] Managed .gitdepsignore written."
 
 echo
 echo "[Setup_Minimal] Platforms  : Linux $HOST_ARCH + Android arm64"
