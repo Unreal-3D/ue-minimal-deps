@@ -282,9 +282,29 @@ fi
 contains "$BAT" 'GitDependencies.exe %EXCLUDES%' "bat hook contains only the exclude list"
 
 # Platform scope: the Windows profile must cut payload outside Win64 + Android.
-for pat in WinArm64 ArtToolsOSX UbaAgentHelperMac LinuxArm64 LinuxAArch64 linux32 linuxarm overlay-arm64-ios winuwp; do
+# UbaAgentHelperMac/linuxarm/winuwp are UE5 spellings that no longer exist on
+# ue6-main, and ue6-main renamed the UWP vcpkg triplets to overlay-*-uwp; the
+# profile keeps both spellings so one script serves 5.7/5.8 and UE6.
+for pat in WinArm64 ArtToolsOSX UbaAgentHelperMac LinuxArm64 LinuxAArch64 linux32 linuxarm overlay-arm64-ios overlay-arm64-uwp overlay-x64-uwp winuwp; do
 	contains "$BAT" "-exclude=$pat" "bat excludes $pat"
 done
+# CEF drop names are version-specific: 147.1.5 is 5.8.3, 147.0.14 is ue6-main.
+for pat in 'cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_windowsarm64' \
+           'cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_windowsarm64' \
+           'cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_linux64'; do
+	contains "$BAT" "-exclude=$pat" "bat excludes the CEF drop $pat"
+done
+# MetaHuman + Protobuf are one decision: the payload cut needs the plugin off.
+contains "$BAT" '-exclude=/Engine/Plugins/MetaHuman' "bat cuts the MetaHuman payload"
+contains "$BAT" '-exclude=/Engine/Source/ThirdParty/Protobuf' "bat cuts the MetaHuman Protobuf libs"
+contains "$BAT" ':disable_metahuman' "bat disables MetaHumanSDK when its payload is cut"
+contains "$BAT" 'dry run: MetaHumanSDK plugin edit skipped' "bat leaves the plugin alone on a dry run"
+contains "$BAT" ':mh_failed' "bat aborts when the plugin edit does not land"
+contains "$BAT" '--keep-metahuman' "bat can keep MetaHuman instead"
+contains "$BAT" '--no-cache' "bat can disable the GitDependencies blob cache"
+# --keep-metahuman must be consumed by the profile, never forwarded to
+# Setup.bat/GitDependencies, which rejects unknown parameters and exits 0.
+contains "$BAT" 'if /I "%~1"=="--keep-metahuman" (' "bat consumes --keep-metahuman before building REST"
 # WinRT also holds Win64 FreeType libs, and bare x86 holds WiX/Win32 payload.
 not_contains "$BAT" '-exclude=WinRT' "bat does not exclude WinRT"
 if grep -Eq -- '-exclude=x86([[:space:]]|$)' "$BAT"; then

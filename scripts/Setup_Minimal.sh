@@ -202,6 +202,11 @@ EXCLUDES+=(
 	-exclude=cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_linux64
 	-exclude=cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_windows64
 	-exclude=cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_windowsarm64
+	# ue6-main renamed the 147 drop to 147.0.14+g76d2442; the 5.8 names above are
+	# kept so this one list still fits both engines (the unused pair is STALE).
+	-exclude=cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_linux64
+	-exclude=cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_windows64
+	-exclude=cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_windowsarm64
 )
 
 # ---- Android ABIs: arm64-v8a only ------------------------------------------

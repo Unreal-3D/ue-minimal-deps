@@ -10,6 +10,11 @@ three drop-in profiles and a verifier that replays the exact matcher over your
 engine's `Commit.gitdeps.xml`, so you can see what a profile keeps, what it cuts
 on purpose, and what it would break.
 
+The profiles are audited against **5.7.4, 5.8.3 and ue6-main (UE6)**. One file
+serves all three: version-specific names that no longer exist are reported as
+`STALE` by the verifier instead of failing, and the newest names are always added
+next to the old ones (CEF drops, UWP vcpkg triplets, the `.NET` RIDs).
+
 ## Which platforms each profile keeps
 
 | Script | Host (the machine you build on) | Additional targets kept |
@@ -47,6 +52,17 @@ scripts only work from an engine root; each checks for `Setup.sh`/`Setup.bat` an
 `Engine/Build/Commit.gitdeps.xml` before doing anything. `bash` works even if the
 file is not executable.
 
+The Windows profile is the one that is run day to day, on 5.8.3 and on ue6-main
+(UE6). It accepts two extra flags:
+
+```bat
+Setup_Minimal.bat --keep-metahuman   keep the MetaHuman payload and Protobuf
+Setup_Minimal.bat --no-cache         do not keep the .git/ue-gitdeps blob cache
+```
+
+Without it the profile cuts the MetaHuman family and disables the MetaHumanSDK
+plugin (see [Windows profile](#windows-profile)).
+
 Excluded files are never downloaded and never deleted. Each profile also writes a
 managed `.gitdepsignore` in the engine root, which GitDependencies reads even when
 you run a plain `Setup.sh` / `Setup.bat` - delete that file to restore a full
@@ -82,23 +98,42 @@ python3 /path/to/ue-minimal-deps/tools/gitdeps_audit.py --manifest /other/UE/Eng
 `tools/gitdeps_segments.py` explores the manifest's segment layout when you need
 to find where a platform's payload lives.
 
-## Verified file counts
+The verifier only needs the manifest, not a checkout, so one profile can be
+checked against every engine version you care about:
 
-Files kept, audited against both engine versions. These are file counts, not
-bytes - `Commit.gitdeps.xml` has no size field:
+```bash
+for M in /path/UE5.7/Engine/Build/Commit.gitdeps.xml \
+         /path/UE5/Engine/Build/Commit.gitdeps.xml \
+         /path/UE6/Engine/Build/Commit.gitdeps.xml; do
+  for P in windows macos linux; do
+    python3 tools/gitdeps_audit.py --manifest "$M" --profile "$P" \
+      | grep -E '^(profile|size|RESULT|UNEXPECTED|  X )'
+  done
+done
+```
+
+## Verified file counts and sizes
+
+Files kept, audited against every engine version this repo has been pointed at.
+The byte column comes from the manifest's `<Blobs>` table, which 5.7.4 does not
+have and 5.8+ does; it is the unpacked size on disk, while GitDependencies' own
+"Updating dependencies" counter reads lower because the CDN transfers
+compressed blobs (ue6-main: 28.1 GiB unpacked, ~12 GB of transfer):
 
 | Engine | macOS x64 / arm64 | Windows x64 | Linux x64 / arm64 |
 |---|---|---|---|
-| 5.7.4 (146,315 files) | 86,734 | 84,775 | 84,052 / 83,936 |
-| 5.8.3 (134,335 files) | 96,120 / 96,119 | 94,592 | 93,760 / 93,646 |
+| 5.7.4 (146,315 files, 80.4 GiB) | 86,736 / 86,735 (40.4 GiB) | 84,720 (28.5 GiB) | 84,056 / 83,935 (39.0 GiB) |
+| 5.8.3 (134,335 files, 85.2 GiB) | 96,117 / 96,116 (44.1 GiB) | 94,525 (27.1 GiB) | 93,759 / 93,643 (40.2 GiB) |
+| ue6-main / UE6 (136,346 files, 88.9 GiB) | 97,601 / 97,600 (44.9 GiB) | 96,093 (28.1 GiB) | 95,500 / 95,402 (42.4 GiB) |
 
 The 5.7.4 counts predate the `.gitdepsignore` split; the difference is the
-handful of Perforce/AutomationTool files the profiles now keep. The 5.8.3 counts
-are current.
+handful of Perforce/AutomationTool files the profiles now keep. The byte figures
+are the Windows/macOS-x64/Linux-x64 unpacked footprint from the `<Blobs>` table.
 
-All ten profile/architecture combinations pass with no `UNEXPECTED CUTS` and no
-`MISSES`. The exclusion rate drops in 5.8.3 because the .NET runtime packs
-halved; compare absolute file counts, not percentages.
+All 15 profile/architecture/engine combinations audited on 2026-11-05 pass with
+no `UNEXPECTED CUTS` and no `MISSES`; every failure in the table above would be a
+cut of a must-keep path. The exclusion rate drops in 5.8.3 because the .NET
+runtime packs halved; compare absolute file counts, not percentages.
 
 ## Windows profile
 
@@ -108,12 +143,43 @@ commented out:
 
 | Cut | Effect | To restore |
 |---|---|---|
-| `/Engine/Plugins/MetaHuman` + `/Engine/Source/ThirdParty/Protobuf` | the MetaHuman plugin family (~2.9 GiB) | disable the **MetaHuman** and **Bridge** plugins in your projects first, then delete the two lines. Bridge is enabled by default and depends on MetaHumanSDK, so disabling only MetaHuman still links `MetaHumanSDKEditor` against the cut Protobuf libraries |
+| `/Engine/Plugins/MetaHuman` + `/Engine/Plugins/Experimental/MetaHuman` + `/Engine/Plugins/Experimental/Toolsets/MetaHuman*` + `/Engine/Source/ThirdParty/Protobuf` | the MetaHuman plugin family (7.58 GiB on UE6, of which MetaHumanCharacter content alone is 6.49 GiB) plus its Protobuf libs (3.93 GiB) | re-run with `--keep-metahuman` |
 | `/Engine/Content/Localization` | English-only editor UI | delete the line |
 | `/Engine/Source/ThirdParty/Perforce` + `/Engine/Extras/P4VUtils` | no Perforce / ChangelistReview source control | re-enable those plugins and delete the lines |
 
+The MetaHuman cut and the plugin state are one decision. `MetaHumanSDKEditor`
+links the Protobuf static libraries, so the payload is only safe to cut while the
+plugin is off. 5.8.3 ships MetaHumanSDK with `EnabledByDefault:false`; ue6-main
+flips it to `true`. The Windows profile therefore checks
+`Engine/Plugins/MetaHuman/MetaHumanSDK/MetaHumanSDK.uplugin` before syncing,
+keeps a `.bak` next to it, and flips `EnabledByDefault` to false when (and only
+when) it is still true. If the flip cannot be written (locked or read-only file)
+the profile aborts with exit code 3 before downloading anything, rather than
+producing a tree that fails to link. A `dry` run never edits the plugin.
+
+`--keep-metahuman` does the opposite: it skips both cuts, restores the `.bak` so
+the kept payload is usable again, and is consumed by the profile itself - it is
+never forwarded to `Setup.bat`/GitDependencies, which would reject the unknown
+parameter, print help and exit 0. Bridge stays enabled, as on 5.8.3, and tolerates
+the disabled dependency.
+
+**Build status:** the 5.8.3 editor builds with this combination. The ue6-main
+editor has not been compiled yet (the host is missing the MSVC 14.50 toolset that
+ue6-main requires), so treat the UE6 MetaHuman/Protobuf cut as payload-verified
+and audit-verified, not yet build-verified.
+
+Note that this is a tracked-file edit: after a normal run `git status` shows
+`MetaHumanSDK.uplugin` modified, and the `.bak` sits next to it. Both are local
+state, not something to commit to the engine.
+
 For a pure platform profile, comment those lines out. The script header carries
 the same list.
+
+Measured on a fresh ue6-main clone (2026-11-05, Windows host): 96,093 files,
+12.1 GB transferred by GitDependencies, 28.1 GiB unpacked on disk. Add the
+engine's own git checkout (~4 GiB) and, unless `--no-cache` is passed, the
+compressed blob cache in `.git/ue-gitdeps` (~11.2 GiB) for the directory total.
+The optional TIER C block below removes another ~6.4 GiB unpacked on UE6.
 
 ### `.gitdepsignore`: cuts that must keep a few files
 
@@ -142,8 +208,10 @@ refuses to overwrite it.
 
 The profile also cuts platform payload outside Win64 + Android arm64:
 `WinArm64`, `ArtToolsOSX`, `UbaAgentHelperMac`, `LinuxArm64`, `LinuxAArch64`,
-`linux32`, `linuxarm`, `overlay-arm64-ios` and `winuwp`. `WinRT` stays because it
-also contains Win64 FreeType libraries.
+`linux32`, `linuxarm`, `overlay-arm64-ios`, `overlay-arm64-uwp`,
+`overlay-x64-uwp` and `winuwp`. `WinRT` stays because it also contains Win64
+FreeType libraries. The last four cover both spellings of the UWP triplets:
+`winuwp` is the 5.x segment, `overlay-*-uwp` is what ue6-main uses.
 
 ## Known limits
 
@@ -173,10 +241,24 @@ also contains Win64 FreeType libraries.
 - **Excludes only affect downloads.** Engine source for every platform is in the
   git tree regardless. On 5.7.4 the macOS profile leaves ~18,800 git-tracked
   files (~417 MB) matching an exclude pattern on disk; none are manifest entries.
+- **GitDependencies keeps its own blob cache.** Downloaded content is stored
+  compressed in `<engine>/.git/ue-gitdeps` (11.2 GiB after a full ue6-main sync)
+  in addition to the unpacked files. It is what makes the next engine bump cheap,
+  so the profiles leave it on; delete the directory to reclaim the space, or pass
+  `--no-cache` on Windows to never build it.
 - **Version drift is real.** CEF drop names, the .NET pack versions, the Oodle
-  layout and the CsvTools RIDs moved between 5.7.4 and 5.8.3. Run the audit after
-  every engine update and read `STALE PATTERNS` and `MISSES`. `--strict` makes a
-  stale pattern or an absent must-keep entry fatal.
+  layout and the CsvTools RIDs moved between 5.7.4, 5.8.3 and ue6-main. Run the
+  audit after every engine update and read `STALE PATTERNS` and `MISSES`.
+  `--strict` makes a stale pattern or an absent must-keep entry fatal.
+- **ue6-main (UE6) specifically.** The 147 CEF drop was renamed from
+  `147.1.5+g68529a5+chromium-147.0.7727.49` to
+  `147.0.14+g76d2442+chromium-147.0.7727.138` (the profile lists both, and the
+  unused pair shows up as STALE); `UbaAgentHelperMac`, `linuxarm` and `winuwp`
+  no longer exist while the UWP vcpkg triplets became `overlay-arm64-uwp` /
+  `overlay-x64-uwp`; MetaHumanSDK is now enabled by default and moved into the
+  engine's dependency payload (7.58 GiB); and the whole manifest grew to 88.9 GiB.
+  The Windows profile was audited against ue6-main on 2026-11-05: 96,093 files,
+  28.1 GiB unpacked, no unexpected cuts, no missed platform payload.
 - **Confidence:** macOS is field-tested end to end on a real 5.7.4 tree; Windows
   and Linux are manifest-audited on both versions only. The Linux profile has not
   been run on Linux hardware.
