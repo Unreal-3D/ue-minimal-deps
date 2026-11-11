@@ -4,19 +4,29 @@ pushd "%~dp0"
 
 rem =====================================================================
 rem  Setup_Minimal.bat - UE minimal dependency sync (Win64 host + Android arm64)
-rem  Audited against the 5.7.4 and 5.8.3 Commit.gitdeps.xml manifests; file
-rem  counts and the full cut list are in the repo's README.md. The manifest has
-rem  no size field, so savings are counted in files, not bytes.
+rem  Audited against the 5.7.4, 5.8.3 and ue6-main (UE6) Commit.gitdeps.xml
+rem  manifests; file counts and the full cut list are in the repo's README.md.
+rem  Sizes come from the manifest <Blobs> table (present from 5.8 on) and are
+rem  what tools/gitdeps_audit.py prints: ue6-main ships 136,346 dependency files
+rem  totalling 88.87 GiB; this profile keeps ~28.1 GiB of them, and the optional
+rem  TIER C block below takes another ~6.4 GiB off on UE6.
 rem
 rem  Unlike the two .sh profiles this one also carries three non-platform cuts
 rem  (MetaHuman/Protobuf, editor localization, Perforce) - see TIER B and the P4
 rem  block below. Comment them out for a pure platform profile.
 rem
 rem  Usage:
-rem     Setup_Minimal.bat           normal sync
+rem     Setup_Minimal.bat           normal sync (MetaHuman family + Protobuf cut)
 rem     Setup_Minimal.bat dry       preview only (--dry-run, lists changes, no download)
 rem     Setup_Minimal.bat --force   overwrite locally modified files (single-dash -force also works, normalized below)
 rem     Setup_Minimal.bat --prompt  prompt before overwriting modified files
+rem     Setup_Minimal.bat --keep-metahuman
+rem                                 keep the MetaHuman payload (and its Protobuf
+rem                                 libs) and leave the plugin enabled
+rem     Setup_Minimal.bat --no-cache
+rem                                 do not keep GitDependencies' compressed blob
+rem                                 cache in .git\ue-gitdeps (~11 GiB after a full
+rem                                 UE6 sync); a later engine bump re-downloads
 rem
 rem  Notes:
 rem   1. Excluded files are NOT downloaded and NOT deleted. To stay minimal,
@@ -27,13 +37,17 @@ rem   2. Setup.bat writes these args into .git\hooks\post-checkout and
 rem      post-merge, so future "git pull" auto-syncs reuse the same excludes.
 rem      This script rewrites both hooks after every run with only the excludes,
 rem      so a "dry" or "--force" run never leaves those flags behind.
-rem   3. TIER B excludes the MetaHuman plugin family and Protobuf. Prereq:
-rem      disable both the MetaHuman and Bridge plugins in your projects and
-rem      verify UnrealEditor builds BEFORE using this. 5.8.3 ships MetaHumanSDK
-rem      with EnabledByDefault:false, but Bridge is enabled by default and
-rem      depends on MetaHumanSDK, so disabling only MetaHuman still links
-rem      MetaHumanSDKEditor against the cut Protobuf libraries. If you need
-rem      MetaHuman, comment out the two TIER B lines below.
+rem   3. TIER B excludes the MetaHuman plugin family (7.58 GiB on UE6, of which
+rem      MetaHumanCharacter content alone is 6.49 GiB) and Protobuf (3.93 GiB).
+rem      MetaHumanSDKEditor links the Protobuf static libs, and 5.8.3 ships
+rem      MetaHumanSDK with EnabledByDefault:false - but UE6 flips it to true, so
+rem      the editor would try to build a plugin whose payload is cut. On UE6 this
+rem      script therefore disables MetaHumanSDK in its .uplugin (keeping a .bak
+rem      next to it) before syncing. Pass --keep-metahuman to skip that and keep
+rem      the payload instead; on 5.8.3 that also clears the plugin edit when the
+rem      .bak still exists. Bridge stays enabled by default, as on 5.8.3 (where
+rem      that combination builds), and tolerates the disabled dependency. The
+rem      ue6-main editor build has not been compiled yet - see the README.
 rem   4. Localization is excluded: editor UI will be English-only.
 rem   5. After engine updates (git pull to a new version) CEF folder names and
 rem      the manifest change: run "dry" first; if a parameter becomes invalid,
@@ -56,6 +70,11 @@ if not exist "Engine\Build\Commit.gitdeps.xml" (
     popd
     exit /b 1
 )
+
+rem Pre-scan for --keep-metahuman. The TIER B block below is evaluated while the
+rem exclude list is built, which happens before the main argument parser runs.
+set "KEEP_METAHUMAN="
+for %%A in (%*) do if /I "%%A"=="--keep-metahuman" set "KEEP_METAHUMAN=1"
 
 set "EXCLUDES="
 set "EXTRA="
@@ -89,18 +108,29 @@ set "EXCLUDES=%EXCLUDES% -exclude=Unix -exclude=macos -exclude=osx -exclude=linu
 rem ---- Platform payload outside the Win64 + Android arm64 scope ----
 rem WinArm64 is a separate segment from Win64: the .NET win-arm64 pack is cut
 rem above, but the platform payload needs its own pattern. The rest are macOS
-rem (ArtToolsOSX, UbaAgentHelperMac), Linux (LinuxArm64/LinuxAArch64/linux32/
-rem linuxarm), iOS (the vcpkg triplet) and UWP. Do NOT exclude WinRT: it also
-rem contains Win64 FreeType libraries (Lib/WinRT/Win64/freetype*.lib).
-set "EXCLUDES=%EXCLUDES% -exclude=WinArm64 -exclude=ArtToolsOSX -exclude=UbaAgentHelperMac -exclude=LinuxArm64 -exclude=LinuxAArch64 -exclude=linux32 -exclude=linuxarm -exclude=overlay-arm64-ios -exclude=winuwp"
+rem (ArtToolsOSX, UbaAgentHelperMac), Linux (LinuxArm64/LinuxAArch64/linux32,
+rem linuxarm - UE5 only, Oodle's Linux ARM dirs) and UWP. Do NOT exclude WinRT:
+rem it also contains Win64 FreeType libraries (Lib/WinRT/Win64/freetype*.lib).
+rem UbaAgentHelperMac, linuxarm and winuwp no longer exist on ue6-main; the
+rem patterns stay because they still do work on 5.8.3, and tools/gitdeps_audit.py
+rem reports a pattern that the current manifest does not know as STALE, not as an
+rem error. UE6 spells its UWP vcpkg triplets overlay-*-uwp, so those are listed too.
+set "EXCLUDES=%EXCLUDES% -exclude=WinArm64 -exclude=ArtToolsOSX -exclude=UbaAgentHelperMac -exclude=LinuxArm64 -exclude=LinuxAArch64 -exclude=linux32 -exclude=linuxarm -exclude=overlay-arm64-ios -exclude=overlay-arm64-uwp -exclude=overlay-x64-uwp -exclude=winuwp"
 rem ---- PhysX3 leftovers (only consumer ApexDestruction plugin is disabled by default) ----
 set "EXCLUDES=%EXCLUDES% -exclude=PhysX3"
 rem ---- CEF non-win64 dirs (keep both win64 versions: editor WebBrowser/Insights need them) ----
+rem UE6 (ue6-main) renamed the 147 drop from 147.1.5+g68529a5 to 147.0.14+g76d2442
+rem and added a "+v2" rebuild of 128 x64. Both x64 drops are kept; the other
+rem platforms are cut. Keeping the 5.8 147.1.5 spellings too makes one profile fit
+rem both engines - a name the current manifest does not know is reported as STALE
+rem by tools/gitdeps_audit.py, not treated as an error.
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_128.4.13+ge76af7e+chromium-128.0.6613.138_linux64"
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_128.4.13+ge76af7e+chromium-128.0.6613.138_macos_universal"
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_128.4.13+ge76af7e+chromium-128.0.6613.138_windowsarm64"
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_linux64"
+set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_linux64"
 set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_147.1.5+g68529a5+chromium-147.0.7727.49_windowsarm64"
+set "EXCLUDES=%EXCLUDES% -exclude=cef_binary_147.0.14+g76d2442+chromium-147.0.7727.138_windowsarm64"
 rem ---- Android ABIs: arm64-v8a (+ a deliberate x86 residue) ----
 rem Drops 32-bit ARM (armeabi-v7a) and the x86_64 emulator ABI. Comment out these
 rem two lines if you need emulator or armeabi-v7a packaging.
@@ -112,9 +142,18 @@ rem Win32 libraries. On macOS and Linux those are already dead weight, so those
 rem profiles do use bare x86; on Windows they are not worth risking for 40 files.
 set "EXCLUDES=%EXCLUDES% -exclude=armeabi-v7a"
 set "EXCLUDES=%EXCLUDES% -exclude=x86_64"
-rem ---- TIER B: disable MetaHumanSDK plugin first, or UnrealEditor build breaks ----
-set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/MetaHuman"
-set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Protobuf"
+rem ---- TIER B: MetaHuman family + its Protobuf static libs ------------------
+rem UE6 flips MetaHumanSDK to EnabledByDefault:true and MetaHumanSDKEditor links
+rem the Protobuf libs, so cutting the payload without disabling the plugin is a
+rem link failure. --keep-metahuman skips both cuts and leaves the plugin alone.
+rem One guarded line per pattern: inside an "if ... (" block cmd expands
+rem %EXCLUDES% once, at parse time, so a multi-line set block would keep only the
+rem last assignment.
+if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/MetaHuman"
+if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Experimental/MetaHuman"
+if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Experimental/Toolsets/MetaHumanGenerator"
+if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Experimental/Toolsets/AllMetaHumanToolsets"
+if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Protobuf"
 rem ---- English-only: editor localization content ----
 set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Content/Localization"
 
@@ -152,6 +191,15 @@ if /I "%~1"=="dry" (
     shift
     goto parse_args
 )
+rem --keep-metahuman is this profile's own flag: consume it here. It must never
+rem reach REST, because REST is forwarded to Setup.bat and on to GitDependencies,
+rem which rejects an unknown parameter by printing help and exiting 0 - a run
+rem that downloads nothing and looks successful.
+if /I "%~1"=="--keep-metahuman" (
+    set "KEEP_METAHUMAN=1"
+    shift
+    goto parse_args
+)
 set "REST=%REST% %~1"
 shift
 goto parse_args
@@ -176,7 +224,7 @@ if defined REST (
     for %%A in (%REST%) do (
         if /I "%%A"=="--force" set "HAS_FORCE=1"
         if /I "%%A"=="--prompt" set "HAS_PROMPT=1"
-        if /I not "%%A"=="--force" if /I not "%%A"=="--prompt" goto :bad_arg
+        if /I not "%%A"=="--force" if /I not "%%A"=="--prompt" if /I not "%%A"=="--no-cache" goto :bad_arg
     )
 )
 if defined HAS_FORCE if defined HAS_PROMPT goto :bad_combo
@@ -208,6 +256,21 @@ if exist ".gitdepsignore" (
         exit /b 2
     )
 )
+rem ---- MetaHumanSDK plugin state ---------------------------------------------
+rem Runs after every argument and .gitdepsignore check has passed, so a run that
+rem would be rejected never leaves the plugin flipped. The dependency payload and
+rem the plugin have to agree: UE6 ships MetaHumanSDK with EnabledByDefault:true,
+rem and MetaHumanSDKEditor links the Protobuf static libs that TIER B cuts.
+rem A dry run is a preview: it must not edit engine files, so it skips this.
+if defined WAS_DRY (
+    echo [Setup_Minimal] dry run: MetaHumanSDK plugin edit skipped.
+) else if defined KEEP_METAHUMAN (
+    call :restore_metahuman
+) else (
+    call :disable_metahuman
+    if errorlevel 1 goto :mh_failed
+)
+
 > ".gitdepsignore" echo # Generated by Setup_Minimal.bat - re-run that script to refresh.
 rem Written one rule per line: a FOR over the concatenated list would treat the
 rem "*.png" rule as a wildcard set and silently emit nothing when it matches no
@@ -249,7 +312,7 @@ exit /b %EC%
 
 :bad_arg
 echo [ERROR] Unsupported argument: %REST%
-echo [ERROR] This profile accepts only "dry", "--force" and "--prompt".
+echo [ERROR] This profile accepts only "dry", "--force", "--prompt", "--keep-metahuman" and "--no-cache".
 popd
 exit /b 2
 
@@ -258,9 +321,42 @@ echo [ERROR] --force and --prompt are mutually exclusive; GitDependencies reject
 popd
 exit /b 2
 
+:mh_failed
+echo [ERROR] MetaHumanSDK is still enabled while its payload and Protobuf are excluded.
+echo [ERROR] That combination fails the UnrealEditor link step, so nothing was synced.
+echo [ERROR] Either fix the .uplugin or re-run with --keep-metahuman.
+popd
+exit /b 3
+
+:disable_metahuman
+rem Idempotent: only touches the file while EnabledByDefault is still true, and
+rem keeps the pre-edit copy next to it. All PowerShell quoting is single-quoted
+rem so cmd can pass the command through unchanged. $ErrorActionPreference=Stop is
+rem what turns a locked/read-only .uplugin into exit code 1 instead of a
+rem non-terminating error that would let the sync run with a cut payload; the
+rem read-back is the belt-and-braces check that the flip actually landed.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $p='Engine\Plugins\MetaHuman\MetaHumanSDK\MetaHumanSDK.uplugin'; if(-not (Test-Path -LiteralPath $p)){ Write-Host '[Setup_Minimal] MetaHumanSDK plugin not in this engine; nothing to disable.'; exit 0 }; $t=Get-Content -Raw -LiteralPath $p; if($t -notmatch 'EnabledByDefault\x22?\s*:\s*true'){ Write-Host '[Setup_Minimal] MetaHumanSDK already disabled by default.'; exit 0 }; if(-not (Test-Path -LiteralPath ($p+'.bak'))){ Copy-Item -LiteralPath $p -Destination ($p+'.bak') }; $out=$t -replace 'EnabledByDefault(\x22?\s*:\s*)true','EnabledByDefault${1}false'; Set-Content -LiteralPath $p -Value $out -NoNewline; $check=Get-Content -Raw -LiteralPath $p; if($check -notmatch 'EnabledByDefault\x22?\s*:\s*false'){ Write-Host '[ERROR] MetaHumanSDK.uplugin did not change'; exit 1 }; Write-Host '[Setup_Minimal] MetaHumanSDK disabled by default (backup: MetaHumanSDK.uplugin.bak).'; exit 0"
+rem exit 3 hands control to :mh_failed, which prints the explanation and stops
+rem the whole run before Setup.bat downloads anything.
+if errorlevel 1 exit /b 3
+exit /b 0
+
+:restore_metahuman
+rem --keep-metahuman: put the pre-cut descriptor back so the kept payload is
+rem actually reachable. Only reverts an edit this profile made (it only ever
+rem creates the .bak when it also flips the flag).
+if not exist "Engine\Plugins\MetaHuman\MetaHumanSDK\MetaHumanSDK.uplugin.bak" (
+    echo [Setup_Minimal] --keep-metahuman: no .bak to restore, plugin left as-is.
+    exit /b 0
+)
+copy /y "Engine\Plugins\MetaHuman\MetaHumanSDK\MetaHumanSDK.uplugin.bak" "Engine\Plugins\MetaHuman\MetaHumanSDK\MetaHumanSDK.uplugin" >nul
+echo [Setup_Minimal] --keep-metahuman: MetaHumanSDK.uplugin restored from .bak.
+exit /b 0
+
 :write_hook
-rem Helpers for the 5.7.4/5.8.3 Setup.bat layout: a /bin/sh hook with the
-rem GitDependencies executable called relative to the engine root.
+rem Helpers for the Setup.bat layout shared by 5.7.4, 5.8.3 and ue6-main: a
+rem /bin/sh hook with the GitDependencies executable called relative to the
+rem engine root.
 > "%HOOKS_DIR%\%~1" echo #!/bin/sh
 >> "%HOOKS_DIR%\%~1" echo # Generated by Setup_Minimal.bat - re-run that script to refresh.
 >> "%HOOKS_DIR%\%~1" echo # Keeps git pull / checkout dependency syncs on the minimal platform set.

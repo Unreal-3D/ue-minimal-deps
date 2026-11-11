@@ -609,6 +609,8 @@ PROFILES = {
             r"UbaAgentHelperMac/",
             r"overlay-arm64-ios/",
             r"winuwp/",
+            # ue6-main renamed the UWP vcpkg triplets; winuwp is the 5.x spelling.
+            r"overlay-(arm64|x64)-uwp/",
             # Android x86 is deliberately kept: bare x86 also holds WiX 3.8 and
             # Win32 payload. x86_64 and armeabi-v7a are cut, so they need no
             # marker. The alternative CEF branch is a version choice, not a
@@ -842,8 +844,18 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
     meta = PROFILES[profile]
     # File names are XML-attribute-escaped; 5.7.4 has one "&amp;" (a licence file),
     # and comparing the raw text would report a present file as absent.
+    manifest_text = manifest.read_text(encoding="utf-8")
     names = [html.unescape(n)
-             for n in re.findall(r'<File Name="([^"]+)"', manifest.read_text(encoding="utf-8"))]
+             for n in re.findall(r'<File Name="([^"]+)"', manifest_text)]
+    # 5.7.4 has no <Blobs> table; 5.8+ does. When it is there it carries the
+    # unpacked byte count per content hash, which is the only way to talk about
+    # download size before GitDependencies has run at all.
+    blob_sizes = {h.lower(): int(s) for h, s in
+                  re.findall(r'<Blob Hash="([0-9a-fA-F]+)" Size="(\d+)"', manifest_text)}
+    file_bytes = {}
+    if blob_sizes:
+        for fname, fhash in re.findall(r'<File Name="([^"]+)" Hash="([0-9a-fA-F]+)"', manifest_text):
+            file_bytes[html.unescape(fname)] = blob_sizes.get(fhash.lower(), 0)
     matcher = Matcher(patterns)
     ignorer = IgnoreRules(ignore_rules or [])
 
@@ -881,6 +893,21 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
     print(f"ignore rules   : {len(ignorer.rules)} (.gitdepsignore, '!' includes last-match-wins)")
     print(f"files          : {len(names)}  kept {len(kept)}  cut {len(cut)} "
           f"({100 * len(cut) / max(len(names), 1):.1f}% excluded)")
+    if file_bytes:
+        kept_bytes = sum(file_bytes.get(n, 0) for n in kept)
+        cut_bytes = sum(file_bytes.get(n, 0) for n in cut)
+        total_bytes = kept_bytes + cut_bytes
+
+        def gib(value: int) -> str:
+            return f"{value / 2 ** 30:.2f} GiB"
+
+        print(f"size           : {gib(total_bytes)} total  kept {gib(kept_bytes)}  "
+              f"cut {gib(cut_bytes)} ({100 * cut_bytes / max(total_bytes, 1):.1f}% excluded)")
+        print("                 unpacked size from the <Blobs> table; GitDependencies' own "
+              "download counter reads lower because the CDN transfers compressed blobs")
+    else:
+        print("size           : manifest has no <Blobs> size table (pre-5.8), "
+              "savings can only be counted in files")
     print()
 
     kept_set, cut_set = set(kept), set(cut)
