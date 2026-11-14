@@ -10,10 +10,12 @@ three drop-in profiles and a verifier that replays the exact matcher over your
 engine's `Commit.gitdeps.xml`, so you can see what a profile keeps, what it cuts
 on purpose, and what it would break.
 
-The profiles are audited against **5.7.4, 5.8.3 and ue6-main (UE6)**. One file
-serves all three: version-specific names that no longer exist are reported as
+The profiles are audited against **5.7.4, 5.8.3, 5.9 and ue6-main (UE6)**. One file
+serves all four: version-specific names that no longer exist are reported as
 `STALE` by the verifier instead of failing, and the newest names are always added
-next to the old ones (CEF drops, UWP vcpkg triplets, the `.NET` RIDs).
+next to the old ones (CEF drops, UWP vcpkg triplets, the `.NET` RIDs). Engine
+behaviour changes that affect which cuts are safe are detected rather than
+assumed - see [`bBuildAllModules`](#bbuildallmodules-59).
 
 ## Which platforms each profile keeps
 
@@ -124,13 +126,16 @@ compressed blobs (ue6-main: 28.1 GiB unpacked, ~12 GB of transfer):
 |---|---|---|---|
 | 5.7.4 (146,315 files, 80.4 GiB) | 86,736 / 86,735 (40.4 GiB) | 84,720 (28.5 GiB) | 84,056 / 83,935 (39.0 GiB) |
 | 5.8.3 (134,335 files, 85.2 GiB) | 96,117 / 96,116 (44.1 GiB) | 94,525 (27.1 GiB) | 93,759 / 93,643 (40.2 GiB) |
+| 5.9 (135,530 files, 86.9 GiB) | 97,259 / 97,258 (45.2 GiB) | 95,872 (31.6 GiB) | 94,892 / 94,777 (41.3 GiB) |
 | ue6-main / UE6 (136,346 files, 88.9 GiB) | 97,601 / 97,600 (44.9 GiB) | 96,093 (28.1 GiB) | 95,500 / 95,402 (42.4 GiB) |
 
 The 5.7.4 counts predate the `.gitdepsignore` split; the difference is the
 handful of Perforce/AutomationTool files the profiles now keep. The byte figures
 are the Windows/macOS-x64/Linux-x64 unpacked footprint from the `<Blobs>` table.
+5.9 keeps more than 5.8.3 on Windows because `bBuildAllModules` forces the
+Protobuf and Perforce libs to stay (see below).
 
-All 15 profile/architecture/engine combinations audited on 2026-11-05 pass with
+All 20 profile/architecture/engine combinations audited on 2026-11-14 pass with
 no `UNEXPECTED CUTS` and no `MISSES`; every failure in the table above would be a
 cut of a must-keep path. The exclusion rate drops in 5.8.3 because the .NET
 runtime packs halved; compare absolute file counts, not percentages.
@@ -174,6 +179,26 @@ state, not something to commit to the engine.
 
 For a pure platform profile, comment those lines out. The script header carries
 the same list.
+
+### `bBuildAllModules` (5.9+)
+
+5.9's `Engine/Source/UnrealEditor.Target.cs` sets `bBuildAllModules = true`: the
+editor target compiles every engine module, so a plugin's `EnabledByDefault` no
+longer removes anything from the build. Those modules still link their
+third-party libs, which means `/Engine/Source/ThirdParty/Protobuf`
+(`MetaHumanSDKEditor`) and `/Engine/Source/ThirdParty/Perforce`
+(`PerforceSourceControl`, `ChangelistReview`) have to stay. Measured on a 5.9
+editor build: with them cut, the build reaches the last two link actions and dies
+with `LNK1181` on `libprotobuf.lib` / `libclient.lib`.
+
+The Windows profile detects the flag in the target file and drops those two
+excludes automatically (the audit applies the same rule, so its counts match the
+sync). The same flag makes the TIER C block unsafe on 5.9+ - those
+default-disabled plugins are compiled and linked anyway.
+
+On 5.9 a Windows sync therefore keeps 95,872 files / 31.6 GiB. The rest of the
+profile - platform cuts, MetaHuman content, localization, P4VUtils - is
+unchanged.
 
 Measured on a fresh ue6-main clone (2026-11-05, Windows host): 96,093 files,
 12.1 GB transferred by GitDependencies, 28.1 GiB unpacked on disk. Add the
@@ -247,9 +272,17 @@ FreeType libraries. The last four cover both spellings of the UWP triplets:
   so the profiles leave it on; delete the directory to reclaim the space, or pass
   `--no-cache` on Windows to never build it.
 - **Version drift is real.** CEF drop names, the .NET pack versions, the Oodle
-  layout and the CsvTools RIDs moved between 5.7.4, 5.8.3 and ue6-main. Run the
-  audit after every engine update and read `STALE PATTERNS` and `MISSES`.
+  layout and the CsvTools RIDs moved between 5.7.4, 5.8.3, 5.9 and ue6-main. Run
+  the audit after every engine update and read `STALE PATTERNS` and `MISSES`.
   `--strict` makes a stale pattern or an absent must-keep entry fatal.
+- **Windows git hooks need `MSYS_NO_PATHCONV`.** Git for Windows runs hooks
+  through its MSYS `/bin/sh`, which rewrites a rooted exclude such as
+  `/Engine/Plugins/MetaHuman` into `C:/Program Files/Git/Engine/Plugins/MetaHuman`.
+  The pattern then excludes nothing and the payload comes back on the next
+  `git checkout` / `git pull` - observed on a real 5.9 switch (7.9 GiB of
+  MetaHuman content returned). The profile's hook sets `MSYS_NO_PATHCONV=1` and
+  `MSYS2_ARG_CONV_EXCL='*'` before invoking GitDependencies. The direct
+  `Setup_Minimal.bat` run is unaffected: cmd does no path rewriting.
 - **ue6-main (UE6) specifically.** The 147 CEF drop was renamed from
   `147.1.5+g68529a5+chromium-147.0.7727.49` to
   `147.0.14+g76d2442+chromium-147.0.7727.138` (the profile lists both, and the

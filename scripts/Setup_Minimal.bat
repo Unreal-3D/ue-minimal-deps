@@ -76,6 +76,17 @@ rem exclude list is built, which happens before the main argument parser runs.
 set "KEEP_METAHUMAN="
 for %%A in (%*) do if /I "%%A"=="--keep-metahuman" set "KEEP_METAHUMAN=1"
 
+rem 5.9's UnrealEditor.Target.cs sets bBuildAllModules: the editor target then
+rem compiles every engine module no matter what a plugin's EnabledByDefault says.
+rem Modules that are "disabled" still link their third-party libs, so on such a
+rem tree Protobuf (MetaHumanSDKEditor) and Perforce (PerforceSourceControl,
+rem ChangelistReview) have to stay. Measured on 5.9: cutting them fails the last
+rem two link actions with LNK1181. The same rule makes the TIER C block unsafe on
+rem 5.9, because those plugins' libs are linked too.
+set "BUILD_ALL_MODULES="
+findstr /c:"bBuildAllModules = true" "Engine\Source\UnrealEditor.Target.cs" >nul 2>&1
+if not errorlevel 1 set "BUILD_ALL_MODULES=1"
+
 set "EXCLUDES="
 set "EXTRA="
 set "REST="
@@ -153,7 +164,9 @@ if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/
 if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Experimental/MetaHuman"
 if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Experimental/Toolsets/MetaHumanGenerator"
 if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Experimental/Toolsets/AllMetaHumanToolsets"
-if not defined KEEP_METAHUMAN set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Protobuf"
+rem On a bBuildAllModules tree the plugin is compiled anyway, so the only thing
+rem the cut would buy is a broken link - keep the libs there.
+if not defined KEEP_METAHUMAN if not defined BUILD_ALL_MODULES set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Protobuf"
 rem ---- English-only: editor localization content ----
 set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Content/Localization"
 
@@ -162,7 +175,10 @@ rem set "EXCLUDES=%EXCLUDES% -exclude=Templates -exclude=Samples -exclude=Engine
 
 rem ---- TIER C (optional, saves another ~3.03 GiB, total ~9.91 GiB): disabled-by-default
 rem      plugins and dead libs. Prereq: never enable these plugins in projects; if a
-rem      build errors about missing files, remove the matching line and re-sync. ----
+rem      build errors about missing files, remove the matching line and re-sync.
+rem      NOT safe on a bBuildAllModules tree (5.9+): the editor compiles those
+rem      plugins anyway, so their third-party libs are linked and the build fails.
+rem      ----
 rem set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Experimental/ProceduralVegetationEditor -exclude=/Engine/Plugins/Experimental/TextToSpeech -exclude=/Engine/Plugins/Experimental/MeshPartition -exclude=/Engine/Plugins/Experimental/PCGPrimitives -exclude=/Engine/Plugins/Experimental/PCGPrimitives_MeshPartitionInterop -exclude=/Engine/Plugins/Experimental/NNERuntimeIREE -exclude=/Engine/Plugins/Experimental/NNERuntimeRDG -exclude=/Engine/Plugins/Experimental/MoverTests -exclude=/Engine/Plugins/Experimental/MoverExamples -exclude=/Engine/Plugins/Experimental/ChaosModularVehicleExamples -exclude=/Engine/Plugins/Experimental/Volumetrics -exclude=/Engine/Plugins/Experimental/PCGBiomeSample -exclude=/Engine/Plugins/Experimental/Water -exclude=/Engine/Plugins/Experimental/WaterAdvanced -exclude=/Engine/Plugins/Experimental/WaterExtras -exclude=/Engine/Plugins/Experimental/Landmass -exclude=/Engine/Plugins/Experimental/SemanticSearch"
 rem set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Runtime/GeoReferencing -exclude=/Engine/Plugins/Runtime/OpenCV -exclude=/Engine/Plugins/Runtime/Harmonix -exclude=/Engine/Plugins/Runtime/HDRIBackdrop -exclude=/Engine/Plugins/Runtime/USDCore"
 rem set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Plugins/Media/PixelStreaming2 -exclude=/Engine/Plugins/Media/AjaMedia"
@@ -176,7 +192,8 @@ rem      builds are NOT excluded - UAT needs all three RIDs, and the managed
 rem      .gitdepsignore below carries the mac-x64/linux-x64 exceptions. To
 rem      restore P4 support: restore the .bak files and remove this line, then
 rem      re-sync. ----
-set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Perforce -exclude=/Engine/Extras/P4VUtils"
+if not defined BUILD_ALL_MODULES set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Perforce"
+set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Extras/P4VUtils"
 
 rem ---- Arguments ----------------------------------------------------------
 rem "dry" is recognized anywhere before the flags. `shift` does not change %*,
@@ -283,6 +300,7 @@ rem file in the current directory.
 >> ".gitdepsignore" echo !**/EpicGames.Perforce.Native/linux-x64/Release/EpicGames.Perforce.Native.so
 echo [Setup_Minimal] Managed .gitdepsignore written.
 
+if defined BUILD_ALL_MODULES echo [Setup_Minimal] bBuildAllModules editor target (5.9+): keeping Protobuf + Perforce libs and skipping TIER C.
 echo.
 echo [Setup_Minimal] Args:
 echo %EXCLUDES% %EXTRA% %REST%
@@ -354,11 +372,19 @@ echo [Setup_Minimal] --keep-metahuman: MetaHumanSDK.uplugin restored from .bak.
 exit /b 0
 
 :write_hook
-rem Helpers for the Setup.bat layout shared by 5.7.4, 5.8.3 and ue6-main: a
+rem Helpers for the Setup.bat layout shared by 5.7.4, 5.8.3, 5.9 and ue6-main: a
 rem /bin/sh hook with the GitDependencies executable called relative to the
 rem engine root.
+rem MSYS_NO_PATHCONV is load-bearing: git for Windows runs hooks through its
+rem MSYS /bin/sh, which rewrites any argument that looks like a POSIX path. A
+rem rooted exclude such as /Engine/Plugins/MetaHuman reaches the native
+rem GitDependencies.exe as C:/Program Files/Git/Engine/Plugins/MetaHuman and
+rem silently stops excluding anything - the payload comes back. MSYS2_ARG_CONV_EXCL
+rem is the same switch for the newer MSYS2 runtimes.
 > "%HOOKS_DIR%\%~1" echo #!/bin/sh
 >> "%HOOKS_DIR%\%~1" echo # Generated by Setup_Minimal.bat - re-run that script to refresh.
 >> "%HOOKS_DIR%\%~1" echo # Keeps git pull / checkout dependency syncs on the minimal platform set.
+>> "%HOOKS_DIR%\%~1" echo export MSYS_NO_PATHCONV=1
+>> "%HOOKS_DIR%\%~1" echo export MSYS2_ARG_CONV_EXCL='*'
 >> "%HOOKS_DIR%\%~1" echo Engine/Binaries/DotNET/GitDependencies/win-x64/GitDependencies.exe %EXCLUDES%
 exit /b
