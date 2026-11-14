@@ -280,6 +280,12 @@ else
 	pass
 fi
 contains "$BAT" 'GitDependencies.exe %EXCLUDES%' "bat hook contains only the exclude list"
+# Windows hooks run under MSYS /bin/sh, which rewrites /Engine/... arguments into
+# C:/Program Files/Git/Engine/... - the rooted excludes then silently stop working.
+contains "$BAT" 'export MSYS_NO_PATHCONV=1' "bat hook disables MSYS path conversion"
+# 5.9 sets bBuildAllModules: disabled plugins still compile and link their libs.
+contains "$BAT" 'bBuildAllModules = true' "bat detects the 5.9 bBuildAllModules target"
+contains "$BAT" 'if not defined BUILD_ALL_MODULES set "EXCLUDES=%EXCLUDES% -exclude=/Engine/Source/ThirdParty/Protobuf"' "bat keeps Protobuf under bBuildAllModules"
 
 # Platform scope: the Windows profile must cut payload outside Win64 + Android.
 # UbaAgentHelperMac/linuxarm/winuwp are UE5 spellings that no longer exist on

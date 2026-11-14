@@ -270,6 +270,17 @@ argument list: a `dry` run would otherwise leave `--dry-run` behind, and a
 `--force` run would make every future `git pull` overwrite local changes. All
 three profiles write only the exclude list into the hooks.
 
+On Windows there is a third trap on top of that: git for Windows runs hooks
+through its MSYS `/bin/sh`, and MSYS rewrites arguments that look like POSIX
+paths before they reach a native executable. A rooted exclude such as
+`/Engine/Plugins/MetaHuman` arrives at `GitDependencies.exe` as
+`C:/Program Files/Git/Engine/Plugins/MetaHuman`, matches nothing, and the payload
+comes back on the next `git checkout` or `git pull` - measured on a 5.9 branch
+switch, where 7.9 GiB of MetaHuman content reappeared. `Setup_Minimal.bat`'s hook
+therefore exports `MSYS_NO_PATHCONV=1` and `MSYS2_ARG_CONV_EXCL='*'` before
+calling GitDependencies. A direct `Setup_Minimal.bat` run is unaffected, because
+cmd does not rewrite arguments.
+
 ## Verifying any of this yourself
 
 `tools/gitdeps_audit.py` is a faithful port of `IsExcludedFolder`, and its

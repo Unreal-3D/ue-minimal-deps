@@ -856,6 +856,23 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
     if blob_sizes:
         for fname, fhash in re.findall(r'<File Name="([^"]+)" Hash="([0-9a-fA-F]+)"', manifest_text):
             file_bytes[html.unescape(fname)] = blob_sizes.get(fhash.lower(), 0)
+    # 5.9 sets bBuildAllModules in UnrealEditor.Target.cs: the editor compiles
+    # every engine module regardless of plugin defaults, so the profiles keep the
+    # Protobuf and Perforce libs there (the Windows script guards those two
+    # excludes). Mirror that here, otherwise the audit reports a cut the script
+    # no longer makes and under-counts what the sync keeps.
+    engine_root = find_engine_root(manifest)
+    build_all_modules = False
+    if engine_root is not None:
+        target_cs = engine_root / "Engine/Source/UnrealEditor.Target.cs"
+        try:
+            build_all_modules = "bBuildAllModules = true" in target_cs.read_text(
+                encoding="utf-8", errors="replace")
+        except OSError:
+            build_all_modules = False
+    if build_all_modules:
+        patterns = [p for p in patterns
+                    if "ThirdParty/Protobuf" not in p and "ThirdParty/Perforce" not in p]
     matcher = Matcher(patterns)
     ignorer = IgnoreRules(ignore_rules or [])
 
@@ -888,6 +905,9 @@ def audit(manifest: pathlib.Path, profile: str, patterns: list[str], verbose: bo
     print(f"manifest       : {manifest}")
     if engine_root is not None:
         print(f"engine root    : {engine_root}")
+    if build_all_modules:
+        print("engine mode    : bBuildAllModules (5.9+) - Protobuf/Perforce libs kept, "
+              "TIER C unsafe")
     print(f"host arch      : {host_arch}   DotNet runtime pack versions: {', '.join(dotnets) or 'none found'}")
     print(f"exclude args   : {len(patterns)}")
     print(f"ignore rules   : {len(ignorer.rules)} (.gitdepsignore, '!' includes last-match-wins)")
